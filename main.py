@@ -1051,6 +1051,38 @@ class AmazonSellerScraper:
             logger.error(f"Error during pagination: {str(e)}")
             return all_product_links
 
+    def save_results_to_xlsx(self, filename="all_sellers.xlsx", sellers=None):
+        """Save results to an Excel file"""
+        try:
+            import pandas as pd
+        except ImportError:
+            logger.error(
+                "Pandas library is required to save data as Excel. Please install it with: pip install pandas openpyxl")
+            return self.save_results_to_json(filename.replace('.xlsx', '.json'), sellers)
+
+        data_to_save = sellers if sellers is not None else self.sellers_data
+
+        if not data_to_save:
+            logger.warning("No seller data to save")
+            return
+
+        file_path = os.path.join(DATA_DIR, filename)
+
+        # Convert sellers to dictionaries if they're SellerInfo objects
+        results_data = []
+        for seller in data_to_save:
+            if hasattr(seller, 'to_dict'):
+                results_data.append(seller.to_dict())
+            else:
+                results_data.append(seller)
+
+        # Create DataFrame and save to Excel
+        df = pd.DataFrame(results_data)
+        df.to_excel(file_path, index=False, engine='openpyxl')
+
+        logger.info(f"Saved {len(results_data)} sellers to {file_path}")
+        return file_path
+
     async def extract_seller_info(self, page: Page, product_asin: str, country: str, category: str, domain: str) -> \
             Optional[SellerInfo]:
         """
@@ -1203,37 +1235,49 @@ class AmazonSellerScraper:
 
             # Extract seller rating data
             try:
-                # Look for the script tag containing rating data
+                # Use XPath to find the script with rating data
+                # Look for script element with data-a-state attribute containing lifetimeRatingsData
                 rating_script = await page.query_selector(
-                    "xpath=//script[@data-a-state='{\\'key\\':\\\"lifetimeRatingsData\\\"}'")
-                if not rating_script:
-                    rating_script = await page.query_selector(
-                        "xpath=//script[contains(@data-a-state, 'lifetimeRatingsData')]")
+                    "xpath=//script[contains(@data-a-state, 'lifetimeRatingsData')]")
 
                 if rating_script:
-                    script_content = await rating_script.get_attribute("data-a-state")
-                    if script_content:
-                        # Parse the JSON content
+                    # Get the data-a-state attribute value
+                    script_attribute = await rating_script.get_attribute("data-a-state")
+                    if script_attribute:
                         import json
                         try:
-                            # Clean up the JSON string
-                            script_content = script_content.replace("\\'", "'").replace("'", '"')
-                            data_obj = json.loads(script_content)
+                            # Clean up and parse the JSON string
+                            script_attribute = script_attribute.replace("\\'", "'").replace("'", '"')
+                            data_obj = json.loads(script_attribute)
 
-                            # Extract the rating data
-                            ratings_data = data_obj.get("key", {})
-                            if isinstance(ratings_data, str) and ratings_data == "lifetimeRatingsData":
-                                # The data is in the script content itself
-                                ratings_data = json.loads(await rating_script.evaluate("el => el.textContent"))
+                            if data_obj.get("key") == "lifetimeRatingsData":
+                                # If it only has the key, we need to get the content of the script
+                                script_content = await rating_script.evaluate("node => node.textContent")
+                                if script_content:
+                                    ratings_data = json.loads(script_content)
 
-                            # Calculate the rating
-                            if isinstance(ratings_data, dict):
-                                # If we have counts for each star rating
-                                star1 = ratings_data.get("star1Count", 0)
-                                star2 = ratings_data.get("star2Count", 0)
-                                star3 = ratings_data.get("star3Count", 0)
-                                star4 = ratings_data.get("star4Count", 0)
-                                star5 = ratings_data.get("star5Count", 0)
+                                    # Calculate the rating
+                                    star1 = int(ratings_data.get("star1Count", 0))
+                                    star2 = int(ratings_data.get("star2Count", 0))
+                                    star3 = int(ratings_data.get("star3Count", 0))
+                                    star4 = int(ratings_data.get("star4Count", 0))
+                                    star5 = int(ratings_data.get("star5Count", 0))
+
+                                    total_ratings = star1 + star2 + star3 + star4 + star5
+                                    if total_ratings > 0:
+                                        weighted_sum = star1 * 1 + star2 * 2 + star3 * 3 + star4 * 4 + star5 * 5
+                                        seller_info.rating = round(weighted_sum / total_ratings, 2)
+                                        seller_info.rating_count = total_ratings
+                            else:
+                                # The data is directly in the data-a-state attribute
+                                ratings_data = data_obj
+
+                                # Calculate the rating
+                                star1 = int(ratings_data.get("star1Count", 0))
+                                star2 = int(ratings_data.get("star2Count", 0))
+                                star3 = int(ratings_data.get("star3Count", 0))
+                                star4 = int(ratings_data.get("star4Count", 0))
+                                star5 = int(ratings_data.get("star5Count", 0))
 
                                 total_ratings = star1 + star2 + star3 + star4 + star5
                                 if total_ratings > 0:
@@ -1242,9 +1286,42 @@ class AmazonSellerScraper:
                                     seller_info.rating_count = total_ratings
 
                         except json.JSONDecodeError as e:
-                            logger.warning(f"Error parsing rating data JSON: {str(e)}")
+                            logger.debug(f"Error parsing rating data JSON: {str(e)}")
+
+                # If we still don't have ratings, try an alternative XPath selector
+                if seller_info.rating == 0:
+                    try:
+                        # Try using a different XPath to target the element
+                        alt_rating_script = await page.query_selector("xpath=//script[contains(text(), 'star1Count')]")
+                        if alt_rating_script:
+                            script_content = await alt_rating_script.evaluate("node => node.textContent")
+                            if script_content:
+                                # Try to extract JSON from the content
+                                import re
+                                json_match = re.search(r'\{.*?"star1Count".*?\}', script_content)
+                                if json_match:
+                                    try:
+                                        ratings_data = json.loads(json_match.group(0))
+
+                                        # Calculate the rating
+                                        star1 = int(ratings_data.get("star1Count", 0))
+                                        star2 = int(ratings_data.get("star2Count", 0))
+                                        star3 = int(ratings_data.get("star3Count", 0))
+                                        star4 = int(ratings_data.get("star4Count", 0))
+                                        star5 = int(ratings_data.get("star5Count", 0))
+
+                                        total_ratings = star1 + star2 + star3 + star4 + star5
+                                        if total_ratings > 0:
+                                            weighted_sum = star1 * 1 + star2 * 2 + star3 * 3 + star4 * 4 + star5 * 5
+                                            seller_info.rating = round(weighted_sum / total_ratings, 2)
+                                            seller_info.rating_count = total_ratings
+                                    except json.JSONDecodeError:
+                                        logger.debug("Failed to parse JSON from alternative rating script")
+                    except Exception as e:
+                        logger.debug(f"Error with alternative rating extraction: {str(e)}")
+
             except Exception as e:
-                logger.warning(f"Error extracting seller rating: {str(e)}")
+                logger.debug(f"Error extracting seller rating: {str(e)}")
 
             # If we still don't have a business name, try alternative XPath
             if not seller_info.business_name and seller_info.seller_name:
@@ -1661,8 +1738,9 @@ class AmazonSellerScraper:
                 sellers = await self.scrape_sellers_for_country(country_code)
                 self.sellers_data.extend(sellers)
 
-                # Save intermediate results after each country
-                self.save_results_to_json(f"{country_code}_sellers.json", sellers)
+                # Save intermediate results as Excel
+                # self.save_results_to_json(f"{country_code}_sellers.json", sellers)
+                self.save_results_to_xlsx(f"{country_code}_sellers.xlsx", sellers)
 
                 logger.info(f"Completed scraping for {country_code}: Found {len(sellers)} sellers")
             except Exception as e:
@@ -1767,7 +1845,8 @@ async def main():
             await scraper.scrape_all_countries()
 
         # Save final results
-        scraper.save_results_to_json()
+        # scraper.save_results_to_json()
+        scraper.save_results_to_xlsx()
 
         # Print summary
         scraper.print_summary()
