@@ -438,13 +438,16 @@ class AmazonSellerScraper:
             logger.error(f"Error handling cookie banner: {str(e)}")
             return False
 
-    async def set_location_by_postcode(self, page: Page, postcode: str) -> bool:
+    async def set_location_by_postcode(self, page: Page, postcode: str, category_url: Optional[str] = None) -> bool:
         """
-        Set the delivery location using a postcode with human-like interactions
+        Set the delivery location using a postcode with human-like interactions.
+        If location selector is not found on the main page, tries on the category page.
+        Handles special cases like Sweden with split postcode fields.
 
         Args:
             page: Playwright page object
             postcode: Postcode to set
+            category_url: Optional category URL to navigate to if location selector isn't found on main page
 
         Returns:
             bool: True if successful, False otherwise
@@ -463,7 +466,27 @@ class AmazonSellerScraper:
             # Check if location selector exists
             logger.info(f"Looking for location selector to set postcode: {postcode}")
 
-            # Try multiple selectors for the location element
+            # Check for location block first
+            location_block = await page.query_selector("xpath=//div[@id='nav-global-location-slot']")
+
+            # If location block is not found on the main page and we have a category URL, try there
+            if not location_block and category_url:
+                logger.info(f"Location block not found on main page. Navigating to category page: {category_url}")
+                await page.goto(category_url, wait_until="networkidle")
+
+                # Handle cookie banner if it appears on category page
+                await self.check_and_handle_cookie_banner(page)
+
+                # Check for location block again on category page
+                location_block = await page.query_selector("xpath=//div[@id='nav-global-location-slot']")
+
+                if not location_block:
+                    logger.warning("Location block not found on category page either")
+                    return False
+
+                logger.info("Found location block on category page")
+
+            # Try multiple selectors for the location element within the block
             location_selectors = [
                 "xpath=//div[@id='glow-ingress-block']",
                 "xpath=//span[@id='nav-global-location-data-modal-action']",
@@ -498,83 +521,146 @@ class AmazonSellerScraper:
             if not await self.check_content_availability(page):
                 return False
 
-            # Wait for the location modal to appear
-            # Try multiple selectors for the zip input field
-            zip_input = None
-            zip_selectors = [
-                "//div[@id='GLUXZipInputSection']/div/input",
-                "//input[@autocomplete='postal-code']",
-                "//input[@id='GLUXZipUpdateInput']"
-            ]
+            # Check for the dual-field postcode input (like Sweden)
+            # Get all postcode input fields
+            postcode_inputs = await page.query_selector_all("xpath=//input[contains(@id, 'GLUXZipUpdateInput')]")
 
-            for selector in zip_selectors:
-                try:
-                    element = await page.wait_for_selector(selector, timeout=5000)
+            if len(postcode_inputs) == 2:
+                logger.info("Detected dual-field postcode input form (like Sweden)")
+
+                # Split the postcode by space
+                postcode_parts = postcode.strip().split()
+                if len(postcode_parts) != 2:
+                    logger.warning(
+                        f"Postcode '{postcode}' doesn't match the expected format for dual-field input (XXX XX)")
+                    # Try to split it in the middle if it doesn't have a space
+                    if ' ' not in postcode and len(postcode) > 2:
+                        midpoint = len(postcode) // 2
+                        postcode_parts = [postcode[:midpoint], postcode[midpoint:]]
+                        logger.info(f"Split postcode into {postcode_parts}")
+                    else:
+                        postcode_parts = [postcode, ""]  # Fallback
+
+                # Enter first part
+                first_input = postcode_inputs[0]
+                await first_input.click()
+                await self.random_delay(0.1, 0.3)
+                await first_input.fill("")
+                await self.random_delay(0.1, 0.3)
+
+                # Type first part with human-like delays
+                for char in postcode_parts[0]:
+                    await page.keyboard.type(char)
+                    await self.random_delay(0.05, 0.15)
+
+                await self.random_delay(0.3, 0.6)
+
+                # Enter second part
+                second_input = postcode_inputs[1]
+                await second_input.click()
+                await self.random_delay(0.1, 0.3)
+                await second_input.fill("")
+                await self.random_delay(0.1, 0.3)
+
+                # Type second part with human-like delays
+                for char in postcode_parts[1]:
+                    await page.keyboard.type(char)
+                    await self.random_delay(0.05, 0.15)
+
+                await self.random_delay(0.3, 0.6)
+
+                # Find and click the apply/update button
+                apply_button = await page.query_selector("xpath=//span[@id='GLUXZipUpdate']//input[@type='submit']")
+                if not apply_button:
+                    apply_button = await page.query_selector("xpath=//span[@id='GLUXZipUpdate']")
+
+                if not apply_button:
+                    logger.error("Could not find the apply button")
+                    return False
+
+                # Click apply button
+                await apply_button.click()
+                await self.random_delay(0.5, 1.0)
+
+            else:
+                # Handle single field postcode input (standard case)
+                # Wait for the location modal to appear
+                # Try multiple selectors for the zip input field
+                zip_input = None
+                zip_selectors = [
+                    "xpath=//div[@id='GLUXZipInputSection']/div/input",
+                    "xpath=//input[@autocomplete='postal-code']",
+                    "xpath=//input[@id='GLUXZipUpdateInput']"
+                ]
+
+                for selector in zip_selectors:
+                    try:
+                        element = await page.wait_for_selector(selector, timeout=5000)
+                        if element:
+                            is_visible = await element.is_visible()
+                            if is_visible:
+                                zip_input = element
+                                logger.info(f"Found visible zip input: {selector}")
+                                break
+                    except Exception as e:
+                        logger.debug(f"Selector {selector} not found: {str(e)}")
+
+                if not zip_input:
+                    logger.error("Could not find the zip code input field")
+                    return False
+
+                # Move mouse to the input field with randomization
+                box = await zip_input.bounding_box()
+                x_position = box["x"] + random.uniform(5, box["width"] - 5)
+                y_position = box["y"] + random.uniform(5, box["height"] - 5)
+
+                await page.mouse.move(x_position, y_position)
+                await self.random_delay(0.1, 0.3)
+                await page.mouse.click(x_position, y_position)
+                await self.random_delay(0.3, 0.7)
+
+                # Clear the field first (just in case)
+                await zip_input.fill("")
+                await self.random_delay(0.2, 0.4)
+
+                # Type postcode character by character with random delays
+                for char in postcode:
+                    await page.keyboard.type(char)
+                    await self.random_delay(0.05, 0.2)  # Random delay between keystrokes
+
+                await self.random_delay(0.5, 1.0)  # Slight pause after typing
+
+                # Look for apply/update button with multiple possible selectors
+                apply_button = None
+                button_selectors = [
+                    "xpath=//span[@id='GLUXZipUpdate']//input[@type='submit']",
+                    "xpath=//input[@aria-labelledby='GLUXZipUpdate-announce']",
+                    "xpath=//span[@id='GLUXZipUpdate']",
+                    "xpath=//input[contains(@class, 'a-button-input') and contains(@aria-labelledby, 'GLUXZipUpdate')]"
+                ]
+
+                for selector in button_selectors:
+                    element = await page.query_selector(selector)
                     if element:
                         is_visible = await element.is_visible()
                         if is_visible:
-                            zip_input = element
-                            logger.info(f"Found visible zip input: {selector}")
+                            apply_button = element
+                            logger.info(f"Found visible apply button: {selector}")
                             break
-                except Exception as e:
-                    logger.debug(f"Selector {selector} not found: {str(e)}")
 
-            if not zip_input:
-                logger.error("Could not find the zip code input field")
-                return False
+                if not apply_button:
+                    logger.error("Could not find the apply button")
+                    return False
 
-            # Move mouse to the input field with randomization
-            box = await zip_input.bounding_box()
-            x_position = box["x"] + random.uniform(5, box["width"] - 5)
-            y_position = box["y"] + random.uniform(5, box["height"] - 5)
+                # Move mouse to button with randomization
+                button_box = await apply_button.bounding_box()
+                x_position = button_box["x"] + random.uniform(5, button_box["width"] - 5)
+                y_position = button_box["y"] + random.uniform(5, button_box["height"] - 5)
 
-            await page.mouse.move(x_position, y_position)
-            await self.random_delay(0.1, 0.3)
-            await page.mouse.click(x_position, y_position)
-            await self.random_delay(0.3, 0.7)
-
-            # Clear the field first (just in case)
-            await zip_input.fill("")
-            await self.random_delay(0.2, 0.4)
-
-            # Type postcode character by character with random delays
-            for char in postcode:
-                await page.keyboard.type(char)
-                await self.random_delay(0.05, 0.2)  # Random delay between keystrokes
-
-            await self.random_delay(0.5, 1.0)  # Slight pause after typing
-
-            # Look for apply/update button with multiple possible selectors
-            apply_button = None
-            button_selectors = [
-                "xpath=//span[@id='GLUXZipUpdate']//input[@type='submit']",
-                "xpath=//input[@aria-labelledby='GLUXZipUpdate-announce']",
-                "xpath=//span[@id='GLUXZipUpdate']",
-                "xpath=//input[contains(@class, 'a-button-input') and contains(@aria-labelledby, 'GLUXZipUpdate')]"
-            ]
-
-            for selector in button_selectors:
-                element = await page.query_selector(selector)
-                if element:
-                    is_visible = await element.is_visible()
-                    if is_visible:
-                        apply_button = element
-                        logger.info(f"Found visible apply button: {selector}")
-                        break
-
-            if not apply_button:
-                logger.error("Could not find the apply button")
-                return False
-
-            # Move mouse to button with randomization
-            button_box = await apply_button.bounding_box()
-            x_position = button_box["x"] + random.uniform(5, button_box["width"] - 5)
-            y_position = button_box["y"] + random.uniform(5, button_box["height"] - 5)
-
-            await page.mouse.move(x_position, y_position)
-            await self.random_delay(0.2, 0.4)
-            await page.mouse.click(x_position, y_position)
-            await self.random_delay()
+                await page.mouse.move(x_position, y_position)
+                await self.random_delay(0.2, 0.4)
+                await page.mouse.click(x_position, y_position)
+                await self.random_delay()
 
             # Check content availability again after clicking apply
             if not await self.check_content_availability(page):
@@ -1561,7 +1647,8 @@ class AmazonSellerScraper:
 
                         if country_config.get("use_postcode", False):
                             postcode = country_config.get("postcode", "")
-                            location_set = await self.set_location_by_postcode(page, postcode)
+                            category_url = country_config.get("category_url", "")
+                            location_set = await self.set_location_by_postcode(page, postcode, category_url)
                         else:
                             country_name = country_config.get("country_name", "")
                             location_set = await self.select_country_from_dropdown(page, country_name)
