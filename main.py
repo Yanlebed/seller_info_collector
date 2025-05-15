@@ -755,7 +755,7 @@ class AmazonSellerScraper:
             await page.wait_for_selector("//div[contains(@class, 's-main-slot')]", timeout=15000)
 
             # Use the specified XPath selector to find products
-            product_selector = "//div[contains(@class, 's-main-slot') and contains(@class, 's-search-results')]//div[contains(@data-component-type, 's-search-result') and not(contains(@class, 'AdHolder'))]"
+            product_selector = "xpath=//div[contains(@class, 's-main-slot') and contains(@class, 's-search-results')]//div[contains(@data-component-type, 's-search-result') and not(contains(@class, 'AdHolder'))]"
             products = await page.query_selector_all(product_selector)
 
             product_links = []
@@ -971,14 +971,14 @@ class AmazonSellerScraper:
                                 "url": href
                             })
 
-                            # # Simulate looking at the product (hover over it)
-                            # box = await link_element.bounding_box()
-                            # if box:
-                            #     await page.mouse.move(
-                            #         box["x"] + box["width"] / 2,
-                            #         box["y"] + box["height"] / 2
-                            #     )
-                            #     await self.random_delay(0.3, 0.8)
+                            # Simulate looking at the product (hover over it)
+                            box = await link_element.bounding_box()
+                            if box:
+                                await page.mouse.move(
+                                    box["x"] + box["width"] / 2,
+                                    box["y"] + box["height"] / 2
+                                )
+                                await self.random_delay(0.3, 0.8)
 
                     except Exception as e:
                         logger.error(f"Error extracting product link: {str(e)}")
@@ -988,17 +988,34 @@ class AmazonSellerScraper:
                 logger.info(
                     f"Found {len(products_on_page)} product links on page {current_page}, {len(all_product_links)} total so far")
 
-                # Check if there's a next page button and it's enabled
-                next_page_button = await page.query_selector("//a[contains(@class, 's-pagination-next')]")
+                # Check if there's a pagination element and a next page button
+                pagination_element = await page.query_selector("xpath=//span[@aria-label='pagination']")
+
+                if not pagination_element:
+                    logger.info("No pagination element found, reached the end of search results")
+                    break
+
+                # Scroll to the pagination element to make sure it's in view
+                await pagination_element.scroll_into_view_if_needed()
+                await self.random_delay(0.3, 0.6)
+
+                # Find the next page button within the pagination element
+                next_page_button = await pagination_element.query_selector("xpath=//a[contains(@class, 's-pagination-next')]")
 
                 if not next_page_button:
-                    logger.info("No next page button found, reached the end of search results")
+                    logger.info("No next page button found within pagination, reached the end of search results")
                     break
 
                 # Check if the next button is disabled
                 is_disabled = await next_page_button.get_attribute("aria-disabled")
                 if is_disabled and is_disabled.lower() == "true":
                     logger.info("Next page button is disabled, reached the end of search results")
+                    break
+
+                # Get the href to verify it's a valid next page link
+                href = await next_page_button.get_attribute("href")
+                if not href:
+                    logger.info("Next page button has no href, reached the end of search results")
                     break
 
                 # Click on the next page button with human-like movement
@@ -1010,8 +1027,11 @@ class AmazonSellerScraper:
                     x_position = box["x"] + random.uniform(5, box["width"] - 5)
                     y_position = box["y"] + random.uniform(5, box["height"] - 5)
 
+                    # First hover over the button
                     await page.mouse.move(x_position, y_position)
                     await self.random_delay(0.2, 0.5)
+
+                    # Then click
                     await page.mouse.click(x_position, y_position)
 
                     # Wait for the page to load
