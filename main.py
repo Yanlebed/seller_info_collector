@@ -114,6 +114,7 @@ class AmazonSellerScraper:
         self.headless = headless
         self.sellers_data: List[SellerInfo] = []
         self.processed_sellers: Set[str] = set()  # To avoid processing the same seller twice
+        self.existing_sellers: List[SellerInfo] = []  # To store existing sellers from all_sellers.xlsx
         self.semaphore = asyncio.Semaphore(max_concurrency)  # Control concurrency
 
     async def random_delay(self, min_factor=1.0, max_factor=1.0):
@@ -370,7 +371,8 @@ class AmazonSellerScraper:
         """
         try:
             # Check for the error message
-            error_content = await page.query_selector("xpath=//div[contains(text(), 'Sorry, content is not available')]")
+            error_content = await page.query_selector(
+                "xpath=//div[contains(text(), 'Sorry, content is not available')]")
             if error_content:
                 logger.warning("Detected 'Sorry, content is not available' message")
 
@@ -761,7 +763,8 @@ class AmazonSellerScraper:
             location_selector = await page.query_selector("xpath=//div[@id='glow-ingress-block']")
             if not location_selector:
                 logger.warning("Location selector not found, trying alternative selectors")
-                location_selector = await page.query_selector("xpath=//span[@id='nav-global-location-data-modal-action']")
+                location_selector = await page.query_selector(
+                    "xpath=//span[@id='nav-global-location-data-modal-action']")
 
             if location_selector:
                 await location_selector.click()
@@ -987,6 +990,122 @@ class AmazonSellerScraper:
             logger.error(f"Error navigating to search category: {str(e)}")
             return False
 
+    async def load_existing_sellers(self):
+        """
+        Load existing sellers from the all_sellers.xlsx file to avoid duplicates
+        """
+        try:
+            import pandas as pd
+
+            file_path = os.path.join(DATA_DIR, "all_sellers.xlsx")
+            if not os.path.exists(file_path):
+                logger.info("No existing all_sellers.xlsx file found, starting fresh")
+                self.existing_sellers = []
+                return []
+
+            # Read the Excel file
+            df = pd.read_excel(file_path)
+
+            # Convert to list of SellerInfo objects
+            existing_sellers = []
+            for _, row in df.iterrows():
+                seller_id = row.get('seller_id')
+                if seller_id:
+                    # Add to processed_sellers set to avoid re-processing
+                    self.processed_sellers.add(seller_id)
+
+                    # Create SellerInfo object with all fields
+                    seller = SellerInfo(
+                        seller_id=seller_id,
+                        seller_name=row.get('seller_name', ''),
+                        business_name=row.get('business_name', ''),
+                        business_type=row.get('business_type', ''),
+                        trade_registry_number=row.get('trade_registry_number', ''),
+                        phone_number=row.get('phone_number', ''),
+                        email=row.get('email', ''),
+                        address=row.get('address', ''),
+                        rating=row.get('rating', 0.0),
+                        rating_count=row.get('rating_count', 0),
+                        country=row.get('country', ''),
+                        category=row.get('category', ''),
+                        amazon_store_url=row.get('amazon_store_url', ''),
+                        product_asin=row.get('product_asin', ''),
+                        timestamp=row.get('timestamp', '')
+                    )
+                    existing_sellers.append(seller)
+
+            logger.info(f"Loaded {len(existing_sellers)} existing sellers from {file_path}")
+            self.existing_sellers = existing_sellers
+            return existing_sellers
+
+        except Exception as e:
+            logger.error(f"Error loading existing sellers: {str(e)}")
+            self.existing_sellers = []
+            return []
+
+    def save_results_to_xlsx(self, filename="all_sellers.xlsx", sellers=None):
+        """Save results to an Excel file, appending new sellers to existing ones"""
+        try:
+            import pandas as pd
+        except ImportError:
+            logger.error(
+                "Pandas library is required to save data as Excel. Please install it with: pip install pandas openpyxl")
+            return self.save_results_to_json(filename.replace('.xlsx', '.json'), sellers)
+
+        data_to_save = sellers if sellers is not None else self.sellers_data
+
+        if not data_to_save and not hasattr(self, 'existing_sellers'):
+            logger.warning("No seller data to save")
+            return
+
+        file_path = os.path.join(DATA_DIR, filename)
+
+        # For country-specific files, just save the new data
+        if filename != "all_sellers.xlsx":
+            # Convert sellers to dictionaries
+            results_data = []
+            for seller in data_to_save:
+                if hasattr(seller, 'to_dict'):
+                    results_data.append(seller.to_dict())
+                else:
+                    results_data.append(seller)
+
+            # Create DataFrame and save to Excel
+            df = pd.DataFrame(results_data)
+            df.to_excel(file_path, index=False, engine='openpyxl')
+            logger.info(f"Saved {len(results_data)} sellers to {file_path}")
+            return file_path
+
+        # For all_sellers.xlsx, merge with existing data
+        all_sellers = []
+
+        # Add existing sellers if we have them
+        if hasattr(self, 'existing_sellers'):
+            all_sellers.extend(self.existing_sellers)
+
+        # Add new sellers
+        for seller in data_to_save:
+            # Skip if the seller is already in the existing_sellers
+            if hasattr(self, 'existing_sellers') and any(
+                    existing.seller_id == seller.seller_id for existing in self.existing_sellers):
+                continue
+            all_sellers.append(seller)
+
+        # Convert all sellers to dictionaries
+        results_data = []
+        for seller in all_sellers:
+            if hasattr(seller, 'to_dict'):
+                results_data.append(seller.to_dict())
+            else:
+                results_data.append(seller)
+
+        # Create DataFrame and save to Excel
+        df = pd.DataFrame(results_data)
+        df.to_excel(file_path, index=False, engine='openpyxl')
+
+        logger.info(f"Saved {len(results_data)} total sellers to {file_path} ({len(data_to_save)} new)")
+        return file_path
+
     async def get_product_links_with_pagination(self, page: Page, max_products: int, max_pages: int = 3) -> List[Dict]:
         """
         Get links to individual product pages from search results with pagination
@@ -1084,7 +1203,8 @@ class AmazonSellerScraper:
                 await self.random_delay(0.3, 0.6)
 
                 # Find the next page button within the pagination element
-                next_page_button = await pagination_element.query_selector("xpath=//a[contains(@class, 's-pagination-next')]")
+                next_page_button = await pagination_element.query_selector(
+                    "xpath=//a[contains(@class, 's-pagination-next')]")
 
                 if not next_page_button:
                     logger.info("No next page button found within pagination, reached the end of search results")
@@ -1118,8 +1238,36 @@ class AmazonSellerScraper:
                     # Then click
                     await page.mouse.click(x_position, y_position)
 
-                    # Wait for the page to load
-                    await page.wait_for_load_state("networkidle")
+                    # Add timeout and retry logic
+                    pagination_succeeded = False
+                    for retry_attempt in range(3):  # Try up to 3 times
+                        try:
+                            # Set a reasonable timeout
+                            await asyncio.wait_for(
+                                page.wait_for_load_state("networkidle"),
+                                timeout=30.0  # 30 second timeout
+                            )
+                            pagination_succeeded = True
+                            break
+                        except (asyncio.TimeoutError, Exception) as e:
+                            logger.warning(f"Pagination timeout on attempt {retry_attempt + 1}/3: {str(e)}")
+                            # Take a screenshot to debug
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            await page.screenshot(path=os.path.join(SCREENSHOTS_DIR,
+                                                                    f"pagination_timeout_{current_page}_{timestamp}.png"))
+
+                            if retry_attempt < 2:  # Don't reload on the last attempt
+                                logger.info(f"Attempting to reload the page (attempt {retry_attempt + 1})")
+                                try:
+                                    # Try to reload the page
+                                    await page.reload(timeout=30000, wait_until="domcontentloaded")
+                                    await self.random_delay(2.0, 4.0)  # Longer delay after reload
+                                except Exception as reload_error:
+                                    logger.error(f"Error reloading page: {str(reload_error)}")
+
+                    if not pagination_succeeded:
+                        logger.error("Failed to navigate to next page after multiple attempts, stopping pagination")
+                        break
 
                     # Random delay before processing next page
                     await self.random_delay(1.0, 2.0)
@@ -1136,38 +1284,6 @@ class AmazonSellerScraper:
         except Exception as e:
             logger.error(f"Error during pagination: {str(e)}")
             return all_product_links
-
-    def save_results_to_xlsx(self, filename="all_sellers.xlsx", sellers=None):
-        """Save results to an Excel file"""
-        try:
-            import pandas as pd
-        except ImportError:
-            logger.error(
-                "Pandas library is required to save data as Excel. Please install it with: pip install pandas openpyxl")
-            return self.save_results_to_json(filename.replace('.xlsx', '.json'), sellers)
-
-        data_to_save = sellers if sellers is not None else self.sellers_data
-
-        if not data_to_save:
-            logger.warning("No seller data to save")
-            return
-
-        file_path = os.path.join(DATA_DIR, filename)
-
-        # Convert sellers to dictionaries if they're SellerInfo objects
-        results_data = []
-        for seller in data_to_save:
-            if hasattr(seller, 'to_dict'):
-                results_data.append(seller.to_dict())
-            else:
-                results_data.append(seller)
-
-        # Create DataFrame and save to Excel
-        df = pd.DataFrame(results_data)
-        df.to_excel(file_path, index=False, engine='openpyxl')
-
-        logger.info(f"Saved {len(results_data)} sellers to {file_path}")
-        return file_path
 
     async def extract_seller_info(self, page: Page, product_asin: str, country: str, category: str, domain: str) -> \
             Optional[SellerInfo]:
@@ -1299,7 +1415,8 @@ class AmazonSellerScraper:
 
             # Extract email
             try:
-                email_element = await page.query_selector("xpath=//span[contains(text(), 'Email')]/following-sibling::span")
+                email_element = await page.query_selector(
+                    "xpath=//span[contains(text(), 'Email')]/following-sibling::span")
                 if email_element:
                     seller_info.email = await email_element.text_content()
             except Exception as e:
@@ -1516,6 +1633,715 @@ class AmazonSellerScraper:
             logger.error(f"Error checking for CAPTCHA: {str(e)}")
             return False
 
+    async def navigate_to_next_category_page(self, page: Page, current_page: int) -> bool:
+        """Navigate to the next category page with robust error handling"""
+        try:
+            pagination_element = await page.query_selector("xpath=//span[@aria-label='pagination']")
+            if not pagination_element:
+                logger.info("No pagination element found, reached the end of search results")
+                return False
+
+            # Scroll to the pagination element
+            await pagination_element.scroll_into_view_if_needed()
+            await self.random_delay(0.3, 0.6)
+
+            # Find the next page button
+            next_page_button = await pagination_element.query_selector(
+                "xpath=//a[contains(@class, 's-pagination-next')]")
+            if not next_page_button:
+                logger.info("No next page button found within pagination, reached the end of search results")
+                return False
+
+            # Check if button is disabled
+            is_disabled = await next_page_button.get_attribute("aria-disabled")
+            if is_disabled and is_disabled.lower() == "true":
+                logger.info("Next page button is disabled, reached the end of search results")
+                return False
+
+            # Get the href to verify it's a valid next page link
+            href = await next_page_button.get_attribute("href")
+            if not href:
+                logger.info("Next page button has no href, reached the end of search results")
+                return False
+
+            # Click on the next page button
+            logger.info(f"Navigating to category page {current_page + 1}")
+
+            # Move mouse to the button
+            box = await next_page_button.bounding_box()
+            if not box:
+                logger.warning("Could not get bounding box for next page button")
+                return False
+
+            x_position = box["x"] + random.uniform(5, box["width"] - 5)
+            y_position = box["y"] + random.uniform(5, box["height"] - 5)
+
+            await page.mouse.move(x_position, y_position)
+            await self.random_delay(0.2, 0.5)
+            await page.mouse.click(x_position, y_position)
+
+            # Add timeout and retry logic for page navigation
+            pagination_succeeded = False
+            for retry_attempt in range(3):  # Try up to 3 times
+                try:
+                    # Set a reasonable timeout
+                    await asyncio.wait_for(
+                        page.wait_for_load_state("networkidle"),
+                        timeout=30.0  # 30 second timeout
+                    )
+                    pagination_succeeded = True
+                    break
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.warning(f"Pagination timeout on attempt {retry_attempt + 1}/3: {str(e)}")
+                    # Take a screenshot to debug
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    await page.screenshot(
+                        path=os.path.join(SCREENSHOTS_DIR, f"pagination_timeout_{current_page}_{timestamp}.png"))
+
+                    if retry_attempt < 2:  # Don't reload on the last attempt
+                        logger.info(f"Attempting to reload the page (attempt {retry_attempt + 1})")
+                        try:
+                            # Try to reload the page
+                            await page.reload(timeout=30000, wait_until="domcontentloaded")
+                            await self.random_delay(2.0, 4.0)  # Longer delay after reload
+                        except Exception as reload_error:
+                            logger.error(f"Error reloading page: {str(reload_error)}")
+
+            return pagination_succeeded
+
+        except Exception as e:
+            logger.error(f"Error navigating to next page: {str(e)}")
+            return False
+
+    async def process_category_page_for_sellers(self, page: Page, max_sellers: int, country_code: str,
+                                                category_name: str, domain: str, max_pages: int = 3) -> List[
+        SellerInfo]:
+        """
+        Process category pages to find seller links directly from offer listings using a single page.
+        This version processes all offer listings before returning to the category page.
+        """
+        sellers_found = []
+        current_page = 1
+
+        try:
+            while len(sellers_found) < max_sellers and current_page <= max_pages:
+                logger.info(f"Processing category page {current_page}")
+
+                # Store the category page URL - THIS IS CRITICAL
+                category_page_url = page.url
+                logger.info(f"Current category page URL: {category_page_url}")
+
+                # Wait for the page to load
+                await page.wait_for_load_state("networkidle")
+
+                # Scroll the page to load all content
+                await self.human_scroll(page)
+
+                # Find all offer links and collect URLs at once - before any navigation
+                offer_links_selector = "xpath=//div[@data-cy='secondary-offer-recipe']//span[@data-action='s-show-all-offers-display']/a"
+                alternative_selector = "xpath=//a[contains(text(), 'See all buying options')]"
+                third_selector = "xpath=//a[contains(@aria-label, 'buying options')]"
+
+                # Try multiple selectors to find offer links
+                offer_links = []
+                for selector in [offer_links_selector, alternative_selector, third_selector]:
+                    links = await page.query_selector_all(selector)
+                    if links:
+                        offer_links = links
+                        logger.info(f"Found {len(links)} offer links using selector: {selector}")
+                        break
+
+                if not offer_links:
+                    logger.warning("No offer links found on this page")
+                    # Try next page
+                    if not await self.navigate_to_next_category_page(page, current_page):
+                        break
+                    current_page += 1
+                    continue
+
+                logger.info(f"Found {len(offer_links)} offer links on category page {current_page}")
+
+                # Extract all offer URLs before navigating away from the category page
+                offer_urls = []
+                for link in offer_links:
+                    try:
+                        href = await link.get_attribute("href")
+                        if href:
+                            # Ensure it's a full URL
+                            if not href.startswith("http"):
+                                href = f"https://www.{domain}{href}"
+
+                            # Make sure it's the offer listing URL
+                            if "aod=1" not in href:
+                                if "?" in href:
+                                    href = f"{href}&aod=1"
+                                else:
+                                    href = f"{href}?aod=1"
+
+                            offer_urls.append(href)
+                    except Exception as e:
+                        logger.error(f"Error extracting offer URL: {str(e)}")
+
+                logger.info(f"Extracted {len(offer_urls)} valid offer URLs")
+
+                # Visit all offer pages and collect seller information
+                for i, offer_url in enumerate(offer_urls):
+                    if len(sellers_found) >= max_sellers:
+                        break
+
+                    logger.info(f"Processing offer {i + 1}/{len(offer_urls)}: {offer_url}")
+
+                    # Extract ASIN from URL - fix the regex to handle offer-listing URLs
+                    import re
+                    asin_match = re.search(r'/(?:dp|gp/offer-listing)/([A-Z0-9]{10})', offer_url)
+                    asin = asin_match.group(1) if asin_match else "unknown"
+
+                    # Navigate to the offer URL
+                    try:
+                        # Navigate to the offer URL
+                        logger.info(f"Navigating to offer page for ASIN {asin}")
+                        await page.goto(offer_url, wait_until="domcontentloaded", timeout=30000)
+
+                        # Wait for offer container
+                        try:
+                            await page.wait_for_selector("//div[@id='aod-container']", timeout=10000)
+                            logger.info("Offer container loaded successfully")
+                        except Exception as e:
+                            logger.warning(f"Offer container not found, skipping: {str(e)}")
+                            continue
+
+                        # Extract seller links
+                        seller_links_selector = "//div[@id='aod-offer-list']//div[@id='aod-offer-soldBy' and not(contains(.//a/@aria-label, 'Amazon'))]//a[@role='link']"
+                        seller_links = await page.query_selector_all(seller_links_selector)
+
+                        logger.info(f"Found {len(seller_links)} non-Amazon seller links for ASIN {asin}")
+
+                        # Extract all seller URLs before navigating
+                        seller_urls = []
+                        for seller_link in seller_links:
+                            try:
+                                href = await seller_link.get_attribute("href")
+                                if href:
+                                    # Ensure it's a full URL
+                                    if not href.startswith("http"):
+                                        href = f"https://www.{domain}{href}"
+
+                                    # Extract seller ID to check if we've processed it
+                                    seller_id_match = re.search(r'seller=([A-Z0-9]+)', href)
+                                    if seller_id_match:
+                                        seller_id = seller_id_match.group(1)
+                                        # Check if already processed
+                                        if seller_id in self.processed_sellers:
+                                            logger.info(f"Seller {seller_id} already processed, skipping")
+                                            continue
+
+                                        # Mark as processed
+                                        self.processed_sellers.add(seller_id)
+                                        seller_urls.append((href, seller_id))
+                                    else:
+                                        logger.warning(f"Could not extract seller ID from URL: {href}")
+                            except Exception as e:
+                                logger.error(f"Error extracting seller URL: {str(e)}")
+
+                        # Process each seller URL
+                        for seller_url, seller_id in seller_urls:
+                            if len(sellers_found) >= max_sellers:
+                                break
+
+                            try:
+                                # Navigate to the seller page
+                                logger.info(f"Navigating to seller page for {seller_id}")
+                                await page.goto(seller_url, wait_until="domcontentloaded", timeout=30000)
+
+                                # Wait for seller information to load
+                                try:
+                                    await page.wait_for_selector("xpath=//h1[@id='seller-name']", timeout=10000)
+                                    await self.random_delay()
+                                except Exception as e:
+                                    logger.warning(f"Seller page didn't load correctly for {seller_id}: {str(e)}")
+                                    continue
+
+                                # Create seller info object
+                                seller_info = SellerInfo(
+                                    seller_id=seller_id,
+                                    country=country_code,
+                                    category=category_name,
+                                    amazon_store_url=seller_url,
+                                    product_asin=asin
+                                )
+
+                                # Extract seller details
+                                # Extract seller name
+                                try:
+                                    seller_name_element = await page.query_selector("xpath=//h1[@id='seller-name']")
+                                    if seller_name_element:
+                                        seller_info.seller_name = await seller_name_element.text_content()
+                                except Exception as e:
+                                    logger.warning(f"Error extracting seller name: {str(e)}")
+
+                                # Extract business name
+                                try:
+                                    business_name_element = await page.query_selector(
+                                        "xpath=//span[contains(text(), 'Business Name:')]/following-sibling::span")
+                                    if business_name_element:
+                                        seller_info.business_name = await business_name_element.text_content()
+                                except Exception as e:
+                                    logger.warning(f"Error extracting business name: {str(e)}")
+
+                                # Extract business type
+                                try:
+                                    business_type_element = await page.query_selector(
+                                        "xpath=//span[contains(text(), 'Business Type:')]/following-sibling::span")
+                                    if business_type_element:
+                                        seller_info.business_type = await business_type_element.text_content()
+                                except Exception as e:
+                                    logger.warning(f"Error extracting business type: {str(e)}")
+
+                                # Extract trade registry number
+                                try:
+                                    registry_element = await page.query_selector(
+                                        "xpath=//span[contains(text(), 'Trade Register Number:')]/following-sibling::span")
+                                    if registry_element:
+                                        seller_info.trade_registry_number = await registry_element.text_content()
+                                except Exception as e:
+                                    logger.warning(f"Error extracting registry number: {str(e)}")
+
+                                # Extract phone number
+                                try:
+                                    phone_element = await page.query_selector(
+                                        "xpath=//span[contains(text(), 'Phone number')]/following-sibling::span")
+                                    if phone_element:
+                                        seller_info.phone_number = await phone_element.text_content()
+                                except Exception as e:
+                                    logger.warning(f"Error extracting phone number: {str(e)}")
+
+                                # Extract email
+                                try:
+                                    email_element = await page.query_selector(
+                                        "xpath=//span[contains(text(), 'Email')]/following-sibling::span")
+                                    if email_element:
+                                        seller_info.email = await email_element.text_content()
+                                except Exception as e:
+                                    logger.warning(f"Error extracting email: {str(e)}")
+
+                                # Extract address
+                                try:
+                                    address_elements = await page.query_selector_all(
+                                        "xpath=//div[@class='a-row a-spacing-none' and contains(span/text(), 'Business Address')]/following-sibling::div/span")
+                                    address_parts = []
+                                    for element in address_elements:
+                                        text = await element.text_content()
+                                        if text.strip():
+                                            address_parts.append(text.strip())
+
+                                    seller_info.address = ", ".join(address_parts)
+                                except Exception as e:
+                                    logger.warning(f"Error extracting address: {str(e)}")
+
+                                # Extract seller rating data with XPath
+                                try:
+                                    # Use XPath to find the script with rating data
+                                    rating_script = await page.query_selector(
+                                        "xpath=//script[contains(@data-a-state, 'lifetimeRatingsData')]")
+
+                                    if rating_script:
+                                        # Get the data-a-state attribute value
+                                        script_attribute = await rating_script.get_attribute("data-a-state")
+                                        if script_attribute:
+                                            import json
+                                            try:
+                                                # Clean up and parse the JSON string
+                                                script_attribute = script_attribute.replace("\\'", "'").replace("'",
+                                                                                                                '"')
+                                                data_obj = json.loads(script_attribute)
+
+                                                if data_obj.get("key") == "lifetimeRatingsData":
+                                                    # If it only has the key, we need to get the content of the script
+                                                    script_content = await rating_script.evaluate(
+                                                        "node => node.textContent")
+                                                    if script_content:
+                                                        ratings_data = json.loads(script_content)
+
+                                                        # Calculate the rating
+                                                        star1 = int(ratings_data.get("star1Count", 0))
+                                                        star2 = int(ratings_data.get("star2Count", 0))
+                                                        star3 = int(ratings_data.get("star3Count", 0))
+                                                        star4 = int(ratings_data.get("star4Count", 0))
+                                                        star5 = int(ratings_data.get("star5Count", 0))
+
+                                                        total_ratings = star1 + star2 + star3 + star4 + star5
+                                                        if total_ratings > 0:
+                                                            weighted_sum = star1 * 1 + star2 * 2 + star3 * 3 + star4 * 4 + star5 * 5
+                                                            seller_info.rating = round(weighted_sum / total_ratings, 2)
+                                                            seller_info.rating_count = total_ratings
+                                                else:
+                                                    # The data is directly in the data-a-state attribute
+                                                    ratings_data = data_obj
+
+                                                    # Calculate the rating
+                                                    star1 = int(ratings_data.get("star1Count", 0))
+                                                    star2 = int(ratings_data.get("star2Count", 0))
+                                                    star3 = int(ratings_data.get("star3Count", 0))
+                                                    star4 = int(ratings_data.get("star4Count", 0))
+                                                    star5 = int(ratings_data.get("star5Count", 0))
+
+                                                    total_ratings = star1 + star2 + star3 + star4 + star5
+                                                    if total_ratings > 0:
+                                                        weighted_sum = star1 * 1 + star2 * 2 + star3 * 3 + star4 * 4 + star5 * 5
+                                                        seller_info.rating = round(weighted_sum / total_ratings, 2)
+                                                        seller_info.rating_count = total_ratings
+
+                                            except json.JSONDecodeError as e:
+                                                logger.debug(f"Error parsing rating data JSON: {str(e)}")
+
+                                    # Try fallback methods for rating extraction if needed
+                                    if seller_info.rating == 0:
+                                        try:
+                                            # Try using a different XPath to target the element
+                                            alt_rating_script = await page.query_selector(
+                                                "xpath=//script[contains(text(), 'star1Count')]")
+                                            if alt_rating_script:
+                                                script_content = await alt_rating_script.evaluate(
+                                                    "node => node.textContent")
+                                                if script_content:
+                                                    # Try to extract JSON from the content
+                                                    json_match = re.search(r'\{.*?"star1Count".*?\}', script_content)
+                                                    if json_match:
+                                                        try:
+                                                            ratings_data = json.loads(json_match.group(0))
+
+                                                            # Calculate the rating
+                                                            star1 = int(ratings_data.get("star1Count", 0))
+                                                            star2 = int(ratings_data.get("star2Count", 0))
+                                                            star3 = int(ratings_data.get("star3Count", 0))
+                                                            star4 = int(ratings_data.get("star4Count", 0))
+                                                            star5 = int(ratings_data.get("star5Count", 0))
+
+                                                            total_ratings = star1 + star2 + star3 + star4 + star5
+                                                            if total_ratings > 0:
+                                                                weighted_sum = star1 * 1 + star2 * 2 + star3 * 3 + star4 * 4 + star5 * 5
+                                                                seller_info.rating = round(weighted_sum / total_ratings,
+                                                                                           2)
+                                                                seller_info.rating_count = total_ratings
+                                                        except json.JSONDecodeError:
+                                                            logger.debug(
+                                                                "Failed to parse JSON from alternative rating script")
+                                        except Exception as e:
+                                            logger.debug(f"Error with alternative rating extraction: {str(e)}")
+
+                                    # As a fallback, try to extract rating from visible elements
+                                    if seller_info.rating == 0:
+                                        try:
+                                            # Look for visible rating information
+                                            rating_element = await page.query_selector(
+                                                "xpath=//div[contains(@class, 'feedback-detail')]//span[contains(@class, 'a-color-secondary') and contains(text(), '%')]")
+                                            if rating_element:
+                                                rating_text = await rating_element.text_content()
+                                                # Extract percentage, e.g. "90% positive" → 4.5 stars (90% → 4.5/5)
+                                                percentage_match = re.search(r'(\d+)%', rating_text)
+                                                if percentage_match:
+                                                    percentage = int(percentage_match.group(1))
+                                                    # Convert percentage to 5-star scale
+                                                    seller_info.rating = round((percentage / 100) * 5, 2)
+
+                                                # Try to find the count
+                                                count_element = await page.query_selector(
+                                                    "xpath=//div[contains(@class, 'feedback-detail')]//span[contains(@class, 'a-color-secondary') and contains(text(), 'ratings')]")
+                                                if count_element:
+                                                    count_text = await count_element.text_content()
+                                                    count_match = re.search(r'([\d,]+)', count_text)
+                                                    if count_match:
+                                                        count_str = count_match.group(1).replace(',', '')
+                                                        try:
+                                                            seller_info.rating_count = int(count_str)
+                                                        except ValueError:
+                                                            logger.debug(
+                                                                f"Could not convert count string '{count_str}' to integer")
+                                        except Exception as e:
+                                            logger.debug(f"Error extracting visible rating: {str(e)}")
+
+                                except Exception as e:
+                                    logger.debug(f"Error extracting seller rating: {str(e)}")
+
+                                # If we still don't have a business name, use seller name
+                                if not seller_info.business_name and seller_info.seller_name:
+                                    seller_info.business_name = seller_info.seller_name
+
+                                # Add seller info to list
+                                sellers_found.append(seller_info)
+                                logger.info(f"Added seller info for {seller_id}")
+
+                            except Exception as e:
+                                logger.error(f"Error processing seller URL {seller_url}: {str(e)}")
+
+                    except Exception as e:
+                        logger.error(f"Error processing offer URL {offer_url}: {str(e)}")
+
+                # After processing all offer URLs for this category page, return to the category page
+                logger.info(f"Returning to category page {current_page} after processing all offers")
+                try:
+                    await page.goto(category_page_url, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_load_state("networkidle")
+                    await self.random_delay(1.0, 2.0)
+                except Exception as e:
+                    logger.error(f"Error returning to category page: {str(e)}")
+                    # If we can't return to the category page, try to continue with next page if possible
+                    if current_page < max_pages:
+                        try:
+                            # Try to construct next page URL
+                            page_match = re.search(r'page=(\d+)', category_page_url)
+                            if page_match:
+                                page_num = int(page_match.group(1))
+                                next_url = category_page_url.replace(f"page={page_num}", f"page={page_num + 1}")
+                            else:
+                                if "?" in category_page_url:
+                                    next_url = f"{category_page_url}&page={current_page + 1}"
+                                else:
+                                    next_url = f"{category_page_url}?page={current_page + 1}"
+
+                            logger.info(f"Attempting to navigate directly to next page: {next_url}")
+                            await page.goto(next_url, wait_until="domcontentloaded", timeout=30000)
+                            current_page += 1
+                            continue
+                        except Exception as next_e:
+                            logger.error(f"Error navigating to next page: {str(next_e)}")
+                            break
+
+                # Once we've processed all offers on this page, move to the next category page
+                logger.info(f"Completed processing offers on category page {current_page}")
+
+                if not await self.navigate_to_next_category_page(page, current_page):
+                    break
+
+                current_page += 1
+
+                # Verify that we actually moved to a new page
+                new_url = page.url
+                if new_url == category_page_url:
+                    logger.warning(f"Navigation failed - still on the same category page URL after pagination")
+                    # Try one more time to navigate
+                    try:
+                        # Try to extract the page number from URL and increment it manually
+                        page_param_match = re.search(r'page=(\d+)', new_url)
+                        if page_param_match:
+                            current_page_num = int(page_param_match.group(1))
+                            next_page_url = new_url.replace(f"page={current_page_num}", f"page={current_page_num + 1}")
+                            logger.info(f"Manually navigating to: {next_page_url}")
+                            await page.goto(next_page_url, wait_until="domcontentloaded", timeout=30000)
+                        else:
+                            # If no page parameter exists, try adding one
+                            if "?" in new_url:
+                                next_page_url = f"{new_url}&page=2"
+                            else:
+                                next_page_url = f"{new_url}?page=2"
+                            logger.info(f"Manually navigating to: {next_page_url}")
+                            await page.goto(next_page_url, wait_until="domcontentloaded", timeout=30000)
+                    except Exception as e:
+                        logger.error(f"Error during manual pagination: {str(e)}")
+                        break
+
+            logger.info(f"Completed processing {current_page} category page(s), found {len(sellers_found)} sellers")
+            return sellers_found
+
+        except Exception as e:
+            logger.error(f"Error processing category page for sellers: {str(e)}")
+            return sellers_found
+
+    async def process_products_by_page(self, page: Page, max_products: int, country_code: str, category_name: str,
+                                       domain: str, max_pages: int = 3) -> List[SellerInfo]:
+        """
+        Process products page by page, extracting seller information as we go
+        """
+        sellers_found = []
+        current_page = 1
+        total_products_processed = 0
+
+        try:
+            while total_products_processed < max_products and current_page <= max_pages:
+                logger.info(f"Processing search results page {current_page}")
+
+                # Wait for search results to load
+                await page.wait_for_load_state("networkidle")
+
+                # IMPORTANT: Store the category page URL for later return
+                category_page_url = page.url
+
+                # Human-like interaction - simulate scrolling down the page
+                await self.human_scroll(page)
+
+                # Wait for the product grid to appear
+                await page.wait_for_selector("//div[contains(@class, 's-main-slot')]", timeout=15000)
+
+                # Get all products on the current page
+                product_selector = "//div[contains(@class, 's-main-slot') and contains(@class, 's-search-results')]//div[contains(@data-component-type, 's-search-result') and not(contains(@class, 'AdHolder'))]"
+                products = await page.query_selector_all(product_selector)
+
+                # Extract product links for this page only
+                page_products = []
+                for product in products:
+                    try:
+                        asin = await product.get_attribute("data-asin")
+                        if not asin:
+                            continue
+
+                        link_element = await product.query_selector('a.a-link-normal.s-no-outline')
+                        if not link_element:
+                            link_element = await product.query_selector('h2 a')
+                        if not link_element:
+                            link_element = await product.query_selector('.a-link-normal[href*="/dp/"]')
+
+                        if not link_element:
+                            continue
+
+                        href = await link_element.get_attribute("href")
+                        if href:
+                            # Extract full URL
+                            if not href.startswith("http"):
+                                domain_from_url = page.url.split("/")[2]
+                                href = f"https://{domain_from_url}{href}"
+
+                            page_products.append({
+                                "asin": asin,
+                                "url": href
+                            })
+                    except Exception as e:
+                        logger.error(f"Error extracting product link: {str(e)}")
+
+                logger.info(f"Found {len(page_products)} product links on page {current_page}")
+
+                # Process products sequentially without going back to the category page between products
+                for i, product in enumerate(page_products):
+                    if total_products_processed >= max_products:
+                        break
+
+                    asin = product["asin"]
+                    url = product["url"]
+                    logger.info(f"Processing product {i + 1}/{len(page_products)}: {asin}")
+
+                    try:
+                        # Navigate to product page
+                        await page.goto(url, wait_until="domcontentloaded")
+                        await page.wait_for_selector("//span[@id='productTitle']", timeout=10000)
+
+                        # Check for content availability
+                        if not await self.check_content_availability(page):
+                            logger.warning(f"Content unavailable on product page {asin}, skipping")
+                            continue
+
+                        # Check for CAPTCHA
+                        if not await self.handle_captcha(page):
+                            logger.error(f"CAPTCHA detected on product page for {asin}, retrying with backoff")
+                            await self.random_delay(3.0, 5.0)
+                            continue
+
+                        # Extract seller information
+                        seller_info = await self.extract_seller_info(page, asin, country_code, category_name, domain)
+                        if seller_info:
+                            sellers_found.append(seller_info)
+                            logger.info(f"Added seller info for {seller_info.seller_id}")
+
+                        total_products_processed += 1
+                        await self.random_delay(1.0, 2.0)
+
+                    except Exception as e:
+                        logger.error(f"Error processing product {asin}: {str(e)}")
+
+                # After processing all products, return to the category page before checking pagination
+                try:
+                    # First return to the category page
+                    logger.info(f"Returning to category page to check for pagination")
+                    await page.goto(category_page_url, wait_until="domcontentloaded")
+                    await page.wait_for_load_state("networkidle")
+                    await self.random_delay(1.0, 2.0)
+
+                    # Now look for pagination on the category page
+                    pagination_element = await page.query_selector("xpath=//span[@aria-label='pagination']")
+                    if not pagination_element:
+                        logger.info("No pagination element found, reached the end of search results")
+                        break
+
+                    # Scroll to the pagination element
+                    await pagination_element.scroll_into_view_if_needed()
+                    await self.random_delay(0.3, 0.6)
+
+                    # Find the next page button
+                    next_page_button = await pagination_element.query_selector(
+                        "xpath=//a[contains(@class, 's-pagination-next')]")
+                    if not next_page_button:
+                        logger.info("No next page button found within pagination, reached the end of search results")
+                        break
+
+                    # Check if button is disabled
+                    is_disabled = await next_page_button.get_attribute("aria-disabled")
+                    if is_disabled and is_disabled.lower() == "true":
+                        logger.info("Next page button is disabled, reached the end of search results")
+                        break
+
+                    # Get the href to verify it's a valid next page link
+                    href = await next_page_button.get_attribute("href")
+                    if not href:
+                        logger.info("Next page button has no href, reached the end of search results")
+                        break
+
+                    # Click on the next page button
+                    logger.info(f"Navigating to search results page {current_page + 1}")
+
+                    # Move mouse to the button
+                    box = await next_page_button.bounding_box()
+                    if box:
+                        x_position = box["x"] + random.uniform(5, box["width"] - 5)
+                        y_position = box["y"] + random.uniform(5, box["height"] - 5)
+
+                        await page.mouse.move(x_position, y_position)
+                        await self.random_delay(0.2, 0.5)
+                        await page.mouse.click(x_position, y_position)
+
+                        # Add timeout and retry logic for page navigation
+                        pagination_succeeded = False
+                        for retry_attempt in range(3):  # Try up to 3 times
+                            try:
+                                # Set a reasonable timeout
+                                await asyncio.wait_for(
+                                    page.wait_for_load_state("networkidle"),
+                                    timeout=30.0  # 30 second timeout
+                                )
+                                pagination_succeeded = True
+                                break
+                            except (asyncio.TimeoutError, Exception) as e:
+                                logger.warning(f"Pagination timeout on attempt {retry_attempt + 1}/3: {str(e)}")
+                                # Take a screenshot to debug
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                await page.screenshot(path=os.path.join(SCREENSHOTS_DIR,
+                                                                        f"pagination_timeout_{current_page}_{timestamp}.png"))
+
+                                if retry_attempt < 2:  # Don't reload on the last attempt
+                                    logger.info(f"Attempting to reload the page (attempt {retry_attempt + 1})")
+                                    try:
+                                        # Try to reload the page
+                                        await page.reload(timeout=30000, wait_until="domcontentloaded")
+                                        await self.random_delay(2.0, 4.0)  # Longer delay after reload
+                                    except Exception as reload_error:
+                                        logger.error(f"Error reloading page: {str(reload_error)}")
+
+                        if not pagination_succeeded:
+                            logger.error("Failed to navigate to next page after multiple attempts, stopping pagination")
+                            break
+
+                        current_page += 1
+                    else:
+                        logger.warning("Could not get bounding box for next page button")
+                        break
+                except Exception as e:
+                    logger.error(f"Error during pagination: {str(e)}")
+                    break
+
+            logger.info(f"Completed processing {current_page} page(s), found {len(sellers_found)} sellers")
+            return sellers_found
+
+        except Exception as e:
+            logger.error(f"Error during product processing by page: {str(e)}")
+            return sellers_found
+
     async def scrape_sellers_for_country(self, country_code: str, max_retries: int = 5) -> List[SellerInfo]:
         """
         Scrape seller information for a specific country with retry logic
@@ -1548,7 +2374,7 @@ class AmazonSellerScraper:
             logger.info(f"Attempt {attempt + 1}/{max_retries} for {country_code}")
 
             try:
-                # Get a proxy if available - we'll use one proxy for the entire browser session
+                # Get a proxy if available
                 proxy = None
                 if self.proxy_manager:
                     proxy = await self.proxy_manager.get_next_proxy()
@@ -1592,7 +2418,7 @@ class AmazonSellerScraper:
                             # Navigate to homepage to verify cookies
                             await page.goto(start_url, wait_until="networkidle")
 
-                            # Handle cookie banner if present (sometimes appears even with cookies)
+                            # Handle cookie banner if present
                             await self.check_and_handle_cookie_banner(page)
 
                             # Check for CAPTCHA
@@ -1681,7 +2507,7 @@ class AmazonSellerScraper:
                         logger.info(f"Navigating directly to category page: {category_url}")
                         await page.goto(category_url, wait_until="networkidle")
 
-                    # Handle cookie banner again (sometimes appears after navigation)
+                    # Handle cookie banner again
                     await self.check_and_handle_cookie_banner(page)
 
                     # Check for content availability
@@ -1700,63 +2526,15 @@ class AmazonSellerScraper:
                             await self.proxy_manager.mark_proxy_failure(proxy)
                         continue
 
-                    # Get product links with pagination
-                    product_links = await self.get_product_links_with_pagination(
-                        page,
-                        1000000,
-                        max_pages=2  # Adjust based on your needs
+                    # Process products page by page
+                    sellers_batch = await self.process_category_page_for_sellers(
+                        page=page,
+                        max_sellers=self.max_products_per_category,  # Reusing the same limit parameter
+                        country_code=country_code,
+                        category_name=category_name,
+                        domain=domain,
+                        max_pages=25  # Adjust based on your needs
                     )
-
-                    if not product_links:
-                        logger.warning(
-                            f"No product links found for {country_code}, will retry with different fingerprint")
-                        if self.proxy_manager and proxy:
-                            await self.proxy_manager.mark_proxy_failure(proxy)
-                        continue
-
-                    # Process products sequentially using the same browser instance
-                    logger.info(
-                        f"Processing {len(product_links)} products sequentially using a single browser instance")
-                    sellers_batch = []
-                    for product in product_links:
-                        if len(sellers_found) + len(sellers_batch) >= self.max_products_per_category:
-                            break
-
-                        asin = product["asin"]
-                        url = product["url"]
-                        logger.info(f"Processing product {asin}: {url}")
-
-
-                        try:
-                            # Navigate to product page
-                            await page.goto(url, wait_until="domcontentloaded")
-                            await page.wait_for_selector("//span[@id='productTitle']", timeout=10000)
-
-                            # Check for content availability
-                            if not await self.check_content_availability(page):
-                                logger.warning(f"Content unavailable on product page {asin}, skipping")
-                                continue
-
-                            # Check for CAPTCHA
-                            if not await self.handle_captcha(page):
-                                logger.error(f"CAPTCHA detected on product page for {asin}, retrying with backoff")
-                                # Take a longer break to avoid triggering more CAPTCHAs
-                                await self.random_delay(3.0, 5.0)
-                                continue
-
-                            # Extract seller information
-                            seller_info = await self.extract_seller_info(page, asin, country_code, category_name,
-                                                                         domain)
-                            if seller_info:
-                                sellers_batch.append(seller_info)
-                                logger.info(f"Added seller info for {seller_info.seller_id}")
-
-                            # Take a short random delay between products to appear more human-like
-                            await self.random_delay(1.0, 2.0)
-
-                        except Exception as e:
-                            logger.error(f"Error processing product {asin}: {str(e)}")
-                            continue
 
                     # Add the batch of sellers to our overall list
                     sellers_found.extend(sellers_batch)
@@ -1858,20 +2636,26 @@ class AmazonSellerScraper:
         print("AMAZON SELLER SCRAPING RESULTS SUMMARY")
         print("=" * 60)
 
-        # Group by country
+        # Get total unique sellers (including existing ones)
+        total_unique = len(self.processed_sellers)
+        existing_count = len(self.existing_sellers) if hasattr(self, 'existing_sellers') else 0
+        new_count = len(self.sellers_data)
+
+        print(f"Total unique sellers: {total_unique}")
+        print(f"Existing sellers: {existing_count}")
+        print(f"Newly discovered sellers: {new_count}")
+        print("-" * 60)
+
+        # Group by country (only for new sellers)
         by_country = {}
         for seller in self.sellers_data:
             if seller.country not in by_country:
                 by_country[seller.country] = []
             by_country[seller.country].append(seller)
 
-        print(f"Total unique sellers found: {len(self.processed_sellers)}")
-        print(f"Total seller records: {len(self.sellers_data)}")
-        print("-" * 60)
-
-        # Print breakdown by country
+        # Print breakdown by country for new sellers
         for country, sellers in by_country.items():
-            print(f"{country.upper()}: {len(sellers)} sellers")
+            print(f"{country.upper()}: {len(sellers)} new sellers")
 
             # Calculate average rating
             ratings = [seller.rating for seller in sellers if seller.rating > 0]
@@ -1910,7 +2694,7 @@ async def main():
     scraper = AmazonSellerScraper(
         proxy_manager=proxy_manager,
         captcha_solver=captcha_solver,
-        max_products_per_category=args.max_products,
+        max_products_per_category=200,
         max_concurrency=args.max_concurrency,
         headless=False
     )
@@ -1922,6 +2706,9 @@ async def main():
         proxy_manager.unverified_proxies.append(args.proxy)
         logger.info(f"Added command-line proxy: {args.proxy}")
 
+    # Load existing sellers before scraping
+    await scraper.load_existing_sellers()
+
     try:
         if args.countries:
             # Scrape specific countries
@@ -1932,7 +2719,6 @@ async def main():
             await scraper.scrape_all_countries()
 
         # Save final results
-        # scraper.save_results_to_json()
         scraper.save_results_to_xlsx()
 
         # Print summary
@@ -1946,7 +2732,6 @@ async def main():
         logger.error(f"Unhandled exception: {str(e)}")
         # Try to save whatever data we have
         scraper.save_results_to_json("error_recovery.json")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
