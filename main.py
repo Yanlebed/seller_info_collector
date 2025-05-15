@@ -1067,6 +1067,27 @@ class AmazonSellerScraper:
             SellerInfo object or None if extraction failed
         """
         try:
+            merchant_info = await page.query_selector(
+                "xpath=//div[@data-csa-c-slot-id='odf-feature-text-desktop-merchant-info']")
+            if merchant_info:
+                # Check the seller name
+                seller_name_element = await merchant_info.query_selector(
+                    "xpath=./div[contains(@class, 'offer-display')]/span")
+                if seller_name_element:
+                    seller_name_text = await seller_name_element.text_content()
+                    if seller_name_text and "Amazon" in seller_name_text:
+                        logger.info(f"Seller of the product {product_asin} is Amazon. Skipping the product")
+                        return None
+
+                # Move mouse to merchant info section with slight randomization
+                box = await merchant_info.bounding_box()
+                if box:
+                    await page.mouse.move(
+                        box["x"] + random.uniform(5, box["width"] - 5),
+                        box["y"] + random.uniform(5, box["height"] - 5)
+                    )
+                    await self.random_delay(0.3, 0.8)  # Pause after hover
+
             # Check if there's a seller link on the page
             seller_link = await page.query_selector("xpath=//a[@id='sellerProfileTriggerId']")
             if not seller_link:
@@ -1106,11 +1127,12 @@ class AmazonSellerScraper:
             )
 
             # Click on the seller link to navigate to the seller page
-            logger.info(f"Navigating to seller page for {seller_id}")
-            await seller_link.click()
+            seller_page_full_link = f"https://www.{domain}{href}"
+            logger.info(f"Navigating to seller page for {seller_id}: {seller_page_full_link}")
+            await page.goto(seller_page_full_link, wait_until="domcontentloaded")
 
             # Wait specifically for seller information to appear rather than networkidle
-            await page.wait_for_selector("//h1[@id='seller-name']", timeout=10000)
+            await page.wait_for_selector("xpath=//h1[@id='seller-name']", timeout=10000)
             await self.random_delay()
 
             # Extract seller name
@@ -1133,7 +1155,7 @@ class AmazonSellerScraper:
             # Extract business type
             try:
                 business_type_element = await page.query_selector(
-                    "//span[contains(text(), 'Business Type:')]/following-sibling::span")
+                    "xpath=//span[contains(text(), 'Business Type:')]/following-sibling::span")
                 if business_type_element:
                     seller_info.business_type = await business_type_element.text_content()
             except Exception as e:
