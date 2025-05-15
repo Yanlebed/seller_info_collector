@@ -438,13 +438,16 @@ class AmazonSellerScraper:
             logger.error(f"Error handling cookie banner: {str(e)}")
             return False
 
-    async def set_location_by_postcode(self, page: Page, postcode: str) -> bool:
+    async def set_location_by_postcode(self, page: Page, postcode: str, category_url: Optional[str] = None) -> bool:
         """
-        Set the delivery location using a postcode with human-like interactions
+        Set the delivery location using a postcode with human-like interactions.
+        If location selector is not found on the main page, tries on the category page.
+        Handles special cases like Sweden with split postcode fields.
 
         Args:
             page: Playwright page object
             postcode: Postcode to set
+            category_url: Optional category URL to navigate to if location selector isn't found on main page
 
         Returns:
             bool: True if successful, False otherwise
@@ -463,7 +466,27 @@ class AmazonSellerScraper:
             # Check if location selector exists
             logger.info(f"Looking for location selector to set postcode: {postcode}")
 
-            # Try multiple selectors for the location element
+            # Check for location block first
+            location_block = await page.query_selector("xpath=//div[@id='nav-global-location-slot']")
+
+            # If location block is not found on the main page and we have a category URL, try there
+            if not location_block and category_url:
+                logger.info(f"Location block not found on main page. Navigating to category page: {category_url}")
+                await page.goto(category_url, wait_until="networkidle")
+
+                # Handle cookie banner if it appears on category page
+                await self.check_and_handle_cookie_banner(page)
+
+                # Check for location block again on category page
+                location_block = await page.query_selector("xpath=//div[@id='nav-global-location-slot']")
+
+                if not location_block:
+                    logger.warning("Location block not found on category page either")
+                    return False
+
+                logger.info("Found location block on category page")
+
+            # Try multiple selectors for the location element within the block
             location_selectors = [
                 "xpath=//div[@id='glow-ingress-block']",
                 "xpath=//span[@id='nav-global-location-data-modal-action']",
@@ -498,83 +521,146 @@ class AmazonSellerScraper:
             if not await self.check_content_availability(page):
                 return False
 
-            # Wait for the location modal to appear
-            # Try multiple selectors for the zip input field
-            zip_input = None
-            zip_selectors = [
-                "//div[@id='GLUXZipInputSection']/div/input",
-                "//input[@autocomplete='postal-code']",
-                "//input[@id='GLUXZipUpdateInput']"
-            ]
+            # Check for the dual-field postcode input (like Sweden)
+            # Get all postcode input fields
+            postcode_inputs = await page.query_selector_all("xpath=//input[contains(@id, 'GLUXZipUpdateInput')]")
 
-            for selector in zip_selectors:
-                try:
-                    element = await page.wait_for_selector(selector, timeout=5000)
+            if len(postcode_inputs) == 2:
+                logger.info("Detected dual-field postcode input form (like Sweden)")
+
+                # Split the postcode by space
+                postcode_parts = postcode.strip().split()
+                if len(postcode_parts) != 2:
+                    logger.warning(
+                        f"Postcode '{postcode}' doesn't match the expected format for dual-field input (XXX XX)")
+                    # Try to split it in the middle if it doesn't have a space
+                    if ' ' not in postcode and len(postcode) > 2:
+                        midpoint = len(postcode) // 2
+                        postcode_parts = [postcode[:midpoint], postcode[midpoint:]]
+                        logger.info(f"Split postcode into {postcode_parts}")
+                    else:
+                        postcode_parts = [postcode, ""]  # Fallback
+
+                # Enter first part
+                first_input = postcode_inputs[0]
+                await first_input.click()
+                await self.random_delay(0.1, 0.3)
+                await first_input.fill("")
+                await self.random_delay(0.1, 0.3)
+
+                # Type first part with human-like delays
+                for char in postcode_parts[0]:
+                    await page.keyboard.type(char)
+                    await self.random_delay(0.05, 0.15)
+
+                await self.random_delay(0.3, 0.6)
+
+                # Enter second part
+                second_input = postcode_inputs[1]
+                await second_input.click()
+                await self.random_delay(0.1, 0.3)
+                await second_input.fill("")
+                await self.random_delay(0.1, 0.3)
+
+                # Type second part with human-like delays
+                for char in postcode_parts[1]:
+                    await page.keyboard.type(char)
+                    await self.random_delay(0.05, 0.15)
+
+                await self.random_delay(0.3, 0.6)
+
+                # Find and click the apply/update button
+                apply_button = await page.query_selector("xpath=//span[@id='GLUXZipUpdate']//input[@type='submit']")
+                if not apply_button:
+                    apply_button = await page.query_selector("xpath=//span[@id='GLUXZipUpdate']")
+
+                if not apply_button:
+                    logger.error("Could not find the apply button")
+                    return False
+
+                # Click apply button
+                await apply_button.click()
+                await self.random_delay(0.5, 1.0)
+
+            else:
+                # Handle single field postcode input (standard case)
+                # Wait for the location modal to appear
+                # Try multiple selectors for the zip input field
+                zip_input = None
+                zip_selectors = [
+                    "xpath=//div[@id='GLUXZipInputSection']/div/input",
+                    "xpath=//input[@autocomplete='postal-code']",
+                    "xpath=//input[@id='GLUXZipUpdateInput']"
+                ]
+
+                for selector in zip_selectors:
+                    try:
+                        element = await page.wait_for_selector(selector, timeout=5000)
+                        if element:
+                            is_visible = await element.is_visible()
+                            if is_visible:
+                                zip_input = element
+                                logger.info(f"Found visible zip input: {selector}")
+                                break
+                    except Exception as e:
+                        logger.debug(f"Selector {selector} not found: {str(e)}")
+
+                if not zip_input:
+                    logger.error("Could not find the zip code input field")
+                    return False
+
+                # Move mouse to the input field with randomization
+                box = await zip_input.bounding_box()
+                x_position = box["x"] + random.uniform(5, box["width"] - 5)
+                y_position = box["y"] + random.uniform(5, box["height"] - 5)
+
+                await page.mouse.move(x_position, y_position)
+                await self.random_delay(0.1, 0.3)
+                await page.mouse.click(x_position, y_position)
+                await self.random_delay(0.3, 0.7)
+
+                # Clear the field first (just in case)
+                await zip_input.fill("")
+                await self.random_delay(0.2, 0.4)
+
+                # Type postcode character by character with random delays
+                for char in postcode:
+                    await page.keyboard.type(char)
+                    await self.random_delay(0.05, 0.2)  # Random delay between keystrokes
+
+                await self.random_delay(0.5, 1.0)  # Slight pause after typing
+
+                # Look for apply/update button with multiple possible selectors
+                apply_button = None
+                button_selectors = [
+                    "xpath=//span[@id='GLUXZipUpdate']//input[@type='submit']",
+                    "xpath=//input[@aria-labelledby='GLUXZipUpdate-announce']",
+                    "xpath=//span[@id='GLUXZipUpdate']",
+                    "xpath=//input[contains(@class, 'a-button-input') and contains(@aria-labelledby, 'GLUXZipUpdate')]"
+                ]
+
+                for selector in button_selectors:
+                    element = await page.query_selector(selector)
                     if element:
                         is_visible = await element.is_visible()
                         if is_visible:
-                            zip_input = element
-                            logger.info(f"Found visible zip input: {selector}")
+                            apply_button = element
+                            logger.info(f"Found visible apply button: {selector}")
                             break
-                except Exception as e:
-                    logger.debug(f"Selector {selector} not found: {str(e)}")
 
-            if not zip_input:
-                logger.error("Could not find the zip code input field")
-                return False
+                if not apply_button:
+                    logger.error("Could not find the apply button")
+                    return False
 
-            # Move mouse to the input field with randomization
-            box = await zip_input.bounding_box()
-            x_position = box["x"] + random.uniform(5, box["width"] - 5)
-            y_position = box["y"] + random.uniform(5, box["height"] - 5)
+                # Move mouse to button with randomization
+                button_box = await apply_button.bounding_box()
+                x_position = button_box["x"] + random.uniform(5, button_box["width"] - 5)
+                y_position = button_box["y"] + random.uniform(5, button_box["height"] - 5)
 
-            await page.mouse.move(x_position, y_position)
-            await self.random_delay(0.1, 0.3)
-            await page.mouse.click(x_position, y_position)
-            await self.random_delay(0.3, 0.7)
-
-            # Clear the field first (just in case)
-            await zip_input.fill("")
-            await self.random_delay(0.2, 0.4)
-
-            # Type postcode character by character with random delays
-            for char in postcode:
-                await page.keyboard.type(char)
-                await self.random_delay(0.05, 0.2)  # Random delay between keystrokes
-
-            await self.random_delay(0.5, 1.0)  # Slight pause after typing
-
-            # Look for apply/update button with multiple possible selectors
-            apply_button = None
-            button_selectors = [
-                "xpath=//span[@id='GLUXZipUpdate']//input[@type='submit']",
-                "xpath=//input[@aria-labelledby='GLUXZipUpdate-announce']",
-                "xpath=//span[@id='GLUXZipUpdate']",
-                "xpath=//input[contains(@class, 'a-button-input') and contains(@aria-labelledby, 'GLUXZipUpdate')]"
-            ]
-
-            for selector in button_selectors:
-                element = await page.query_selector(selector)
-                if element:
-                    is_visible = await element.is_visible()
-                    if is_visible:
-                        apply_button = element
-                        logger.info(f"Found visible apply button: {selector}")
-                        break
-
-            if not apply_button:
-                logger.error("Could not find the apply button")
-                return False
-
-            # Move mouse to button with randomization
-            button_box = await apply_button.bounding_box()
-            x_position = button_box["x"] + random.uniform(5, button_box["width"] - 5)
-            y_position = button_box["y"] + random.uniform(5, button_box["height"] - 5)
-
-            await page.mouse.move(x_position, y_position)
-            await self.random_delay(0.2, 0.4)
-            await page.mouse.click(x_position, y_position)
-            await self.random_delay()
+                await page.mouse.move(x_position, y_position)
+                await self.random_delay(0.2, 0.4)
+                await page.mouse.click(x_position, y_position)
+                await self.random_delay()
 
             # Check content availability again after clicking apply
             if not await self.check_content_availability(page):
@@ -1051,6 +1137,38 @@ class AmazonSellerScraper:
             logger.error(f"Error during pagination: {str(e)}")
             return all_product_links
 
+    def save_results_to_xlsx(self, filename="all_sellers.xlsx", sellers=None):
+        """Save results to an Excel file"""
+        try:
+            import pandas as pd
+        except ImportError:
+            logger.error(
+                "Pandas library is required to save data as Excel. Please install it with: pip install pandas openpyxl")
+            return self.save_results_to_json(filename.replace('.xlsx', '.json'), sellers)
+
+        data_to_save = sellers if sellers is not None else self.sellers_data
+
+        if not data_to_save:
+            logger.warning("No seller data to save")
+            return
+
+        file_path = os.path.join(DATA_DIR, filename)
+
+        # Convert sellers to dictionaries if they're SellerInfo objects
+        results_data = []
+        for seller in data_to_save:
+            if hasattr(seller, 'to_dict'):
+                results_data.append(seller.to_dict())
+            else:
+                results_data.append(seller)
+
+        # Create DataFrame and save to Excel
+        df = pd.DataFrame(results_data)
+        df.to_excel(file_path, index=False, engine='openpyxl')
+
+        logger.info(f"Saved {len(results_data)} sellers to {file_path}")
+        return file_path
+
     async def extract_seller_info(self, page: Page, product_asin: str, country: str, category: str, domain: str) -> \
             Optional[SellerInfo]:
         """
@@ -1067,6 +1185,27 @@ class AmazonSellerScraper:
             SellerInfo object or None if extraction failed
         """
         try:
+            merchant_info = await page.query_selector(
+                "xpath=//div[@data-csa-c-slot-id='odf-feature-text-desktop-merchant-info']")
+            if merchant_info:
+                # Check the seller name
+                seller_name_element = await merchant_info.query_selector(
+                    "xpath=./div[contains(@class, 'offer-display')]/span")
+                if seller_name_element:
+                    seller_name_text = await seller_name_element.text_content()
+                    if seller_name_text and "Amazon" in seller_name_text:
+                        logger.info(f"Seller of the product {product_asin} is Amazon. Skipping the product")
+                        return None
+
+                # Move mouse to merchant info section with slight randomization
+                box = await merchant_info.bounding_box()
+                if box:
+                    await page.mouse.move(
+                        box["x"] + random.uniform(5, box["width"] - 5),
+                        box["y"] + random.uniform(5, box["height"] - 5)
+                    )
+                    await self.random_delay(0.3, 0.8)  # Pause after hover
+
             # Check if there's a seller link on the page
             seller_link = await page.query_selector("xpath=//a[@id='sellerProfileTriggerId']")
             if not seller_link:
@@ -1106,11 +1245,12 @@ class AmazonSellerScraper:
             )
 
             # Click on the seller link to navigate to the seller page
-            logger.info(f"Navigating to seller page for {seller_id}")
-            await seller_link.click()
+            seller_page_full_link = f"https://www.{domain}{href}"
+            logger.info(f"Navigating to seller page for {seller_id}: {seller_page_full_link}")
+            await page.goto(seller_page_full_link, wait_until="domcontentloaded")
 
             # Wait specifically for seller information to appear rather than networkidle
-            await page.wait_for_selector("//h1[@id='seller-name']", timeout=10000)
+            await page.wait_for_selector("xpath=//h1[@id='seller-name']", timeout=10000)
             await self.random_delay()
 
             # Extract seller name
@@ -1133,7 +1273,7 @@ class AmazonSellerScraper:
             # Extract business type
             try:
                 business_type_element = await page.query_selector(
-                    "//span[contains(text(), 'Business Type:')]/following-sibling::span")
+                    "xpath=//span[contains(text(), 'Business Type:')]/following-sibling::span")
                 if business_type_element:
                     seller_info.business_type = await business_type_element.text_content()
             except Exception as e:
@@ -1181,37 +1321,49 @@ class AmazonSellerScraper:
 
             # Extract seller rating data
             try:
-                # Look for the script tag containing rating data
+                # Use XPath to find the script with rating data
+                # Look for script element with data-a-state attribute containing lifetimeRatingsData
                 rating_script = await page.query_selector(
-                    "xpath=//script[@data-a-state='{\\'key\\':\\\"lifetimeRatingsData\\\"}'")
-                if not rating_script:
-                    rating_script = await page.query_selector(
-                        "xpath=//script[contains(@data-a-state, 'lifetimeRatingsData')]")
+                    "xpath=//script[contains(@data-a-state, 'lifetimeRatingsData')]")
 
                 if rating_script:
-                    script_content = await rating_script.get_attribute("data-a-state")
-                    if script_content:
-                        # Parse the JSON content
+                    # Get the data-a-state attribute value
+                    script_attribute = await rating_script.get_attribute("data-a-state")
+                    if script_attribute:
                         import json
                         try:
-                            # Clean up the JSON string
-                            script_content = script_content.replace("\\'", "'").replace("'", '"')
-                            data_obj = json.loads(script_content)
+                            # Clean up and parse the JSON string
+                            script_attribute = script_attribute.replace("\\'", "'").replace("'", '"')
+                            data_obj = json.loads(script_attribute)
 
-                            # Extract the rating data
-                            ratings_data = data_obj.get("key", {})
-                            if isinstance(ratings_data, str) and ratings_data == "lifetimeRatingsData":
-                                # The data is in the script content itself
-                                ratings_data = json.loads(await rating_script.evaluate("el => el.textContent"))
+                            if data_obj.get("key") == "lifetimeRatingsData":
+                                # If it only has the key, we need to get the content of the script
+                                script_content = await rating_script.evaluate("node => node.textContent")
+                                if script_content:
+                                    ratings_data = json.loads(script_content)
 
-                            # Calculate the rating
-                            if isinstance(ratings_data, dict):
-                                # If we have counts for each star rating
-                                star1 = ratings_data.get("star1Count", 0)
-                                star2 = ratings_data.get("star2Count", 0)
-                                star3 = ratings_data.get("star3Count", 0)
-                                star4 = ratings_data.get("star4Count", 0)
-                                star5 = ratings_data.get("star5Count", 0)
+                                    # Calculate the rating
+                                    star1 = int(ratings_data.get("star1Count", 0))
+                                    star2 = int(ratings_data.get("star2Count", 0))
+                                    star3 = int(ratings_data.get("star3Count", 0))
+                                    star4 = int(ratings_data.get("star4Count", 0))
+                                    star5 = int(ratings_data.get("star5Count", 0))
+
+                                    total_ratings = star1 + star2 + star3 + star4 + star5
+                                    if total_ratings > 0:
+                                        weighted_sum = star1 * 1 + star2 * 2 + star3 * 3 + star4 * 4 + star5 * 5
+                                        seller_info.rating = round(weighted_sum / total_ratings, 2)
+                                        seller_info.rating_count = total_ratings
+                            else:
+                                # The data is directly in the data-a-state attribute
+                                ratings_data = data_obj
+
+                                # Calculate the rating
+                                star1 = int(ratings_data.get("star1Count", 0))
+                                star2 = int(ratings_data.get("star2Count", 0))
+                                star3 = int(ratings_data.get("star3Count", 0))
+                                star4 = int(ratings_data.get("star4Count", 0))
+                                star5 = int(ratings_data.get("star5Count", 0))
 
                                 total_ratings = star1 + star2 + star3 + star4 + star5
                                 if total_ratings > 0:
@@ -1220,9 +1372,42 @@ class AmazonSellerScraper:
                                     seller_info.rating_count = total_ratings
 
                         except json.JSONDecodeError as e:
-                            logger.warning(f"Error parsing rating data JSON: {str(e)}")
+                            logger.debug(f"Error parsing rating data JSON: {str(e)}")
+
+                # If we still don't have ratings, try an alternative XPath selector
+                if seller_info.rating == 0:
+                    try:
+                        # Try using a different XPath to target the element
+                        alt_rating_script = await page.query_selector("xpath=//script[contains(text(), 'star1Count')]")
+                        if alt_rating_script:
+                            script_content = await alt_rating_script.evaluate("node => node.textContent")
+                            if script_content:
+                                # Try to extract JSON from the content
+                                import re
+                                json_match = re.search(r'\{.*?"star1Count".*?\}', script_content)
+                                if json_match:
+                                    try:
+                                        ratings_data = json.loads(json_match.group(0))
+
+                                        # Calculate the rating
+                                        star1 = int(ratings_data.get("star1Count", 0))
+                                        star2 = int(ratings_data.get("star2Count", 0))
+                                        star3 = int(ratings_data.get("star3Count", 0))
+                                        star4 = int(ratings_data.get("star4Count", 0))
+                                        star5 = int(ratings_data.get("star5Count", 0))
+
+                                        total_ratings = star1 + star2 + star3 + star4 + star5
+                                        if total_ratings > 0:
+                                            weighted_sum = star1 * 1 + star2 * 2 + star3 * 3 + star4 * 4 + star5 * 5
+                                            seller_info.rating = round(weighted_sum / total_ratings, 2)
+                                            seller_info.rating_count = total_ratings
+                                    except json.JSONDecodeError:
+                                        logger.debug("Failed to parse JSON from alternative rating script")
+                    except Exception as e:
+                        logger.debug(f"Error with alternative rating extraction: {str(e)}")
+
             except Exception as e:
-                logger.warning(f"Error extracting seller rating: {str(e)}")
+                logger.debug(f"Error extracting seller rating: {str(e)}")
 
             # If we still don't have a business name, try alternative XPath
             if not seller_info.business_name and seller_info.seller_name:
@@ -1462,7 +1647,8 @@ class AmazonSellerScraper:
 
                         if country_config.get("use_postcode", False):
                             postcode = country_config.get("postcode", "")
-                            location_set = await self.set_location_by_postcode(page, postcode)
+                            category_url = country_config.get("category_url", "")
+                            location_set = await self.set_location_by_postcode(page, postcode, category_url)
                         else:
                             country_name = country_config.get("country_name", "")
                             location_set = await self.select_country_from_dropdown(page, country_name)
@@ -1639,8 +1825,9 @@ class AmazonSellerScraper:
                 sellers = await self.scrape_sellers_for_country(country_code)
                 self.sellers_data.extend(sellers)
 
-                # Save intermediate results after each country
-                self.save_results_to_json(f"{country_code}_sellers.json", sellers)
+                # Save intermediate results as Excel
+                # self.save_results_to_json(f"{country_code}_sellers.json", sellers)
+                self.save_results_to_xlsx(f"{country_code}_sellers.xlsx", sellers)
 
                 logger.info(f"Completed scraping for {country_code}: Found {len(sellers)} sellers")
             except Exception as e:
@@ -1745,7 +1932,8 @@ async def main():
             await scraper.scrape_all_countries()
 
         # Save final results
-        scraper.save_results_to_json()
+        # scraper.save_results_to_json()
+        scraper.save_results_to_xlsx()
 
         # Print summary
         scraper.print_summary()
