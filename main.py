@@ -125,12 +125,11 @@ class AmazonSellerScraper:
             max_factor: Maximum multiplier for the base delay range
         """
         min_delay, max_delay = self.delay_range
+        min_delay *= 0.7  # Reduce minimum delay
+        max_delay *= 0.5  # Reduce maximum delay
+
         factor = random.uniform(min_factor, max_factor)
-
-        # Add some randomness to the delay to mimic human behavior
-        # Humans rarely wait exact multiples of a second
-        extra_ms = random.randint(0, 300) / 1000  # 0-300ms additional random delay
-
+        extra_ms = random.randint(0, 300) / 1000
         delay = random.uniform(min_delay, max_delay) * factor + extra_ms
         await asyncio.sleep(delay)
 
@@ -304,7 +303,7 @@ class AmazonSellerScraper:
             # Extract the location text from the delivery location element without clicking
             location_text = ""
             location_element = await page.query_selector(
-                "//div[@id='glow-ingress-block']/span[@id='glow-ingress-line2']")
+                "xpath=//div[@id='glow-ingress-block']/span[@id='glow-ingress-line2']")
 
             if location_element:
                 location_text = await location_element.text_content()
@@ -314,9 +313,9 @@ class AmazonSellerScraper:
             if not location_text:
                 # Try alternative selectors if the main one didn't work
                 alt_selectors = [
-                    "//div[@id='glow-ingress-block']",
-                    "//span[contains(@class, 'glow-ingress-line2')]",
-                    "//*[contains(@id, 'nav-global-location')]"
+                    "xpath=//div[@id='glow-ingress-block']",
+                    "xpath=//span[contains(@class, 'glow-ingress-line2')]",
+                    "xpath=//*[contains(@id, 'nav-global-location')]"
                 ]
 
                 for selector in alt_selectors:
@@ -371,7 +370,7 @@ class AmazonSellerScraper:
         """
         try:
             # Check for the error message
-            error_content = await page.query_selector("//div[contains(text(), 'Sorry, content is not available')]")
+            error_content = await page.query_selector("xpath=//div[contains(text(), 'Sorry, content is not available')]")
             if error_content:
                 logger.warning("Detected 'Sorry, content is not available' message")
 
@@ -400,13 +399,13 @@ class AmazonSellerScraper:
         try:
             # Amazon-specific cookie decline button selectors
             decline_selectors = [
-                "//button[@aria-label='Decline']",
-                "//input[@id='sp-cc-rejectall-link']",
-                "//a[@id='sp-cc-rejectall-link']",  # Common Amazon cookie decline link
-                "//a[contains(@class, 'sp-cc-buttons') and contains(text(), 'Decline')]",
-                "//button[contains(text(), 'Reject all')]",
-                "//button[contains(text(), 'Decline')]",
-                "//button[contains(text(), 'Only accept essential cookies')]"
+                "xpath=//button[@aria-label='Decline']",
+                "xpath=//input[@id='sp-cc-rejectall-link']",
+                "xpath=//a[@id='sp-cc-rejectall-link']",  # Common Amazon cookie decline link
+                "xpath=//a[contains(@class, 'sp-cc-buttons') and contains(text(), 'Decline')]",
+                "xpath=//button[contains(text(), 'Reject all')]",
+                "xpath=//button[contains(text(), 'Decline')]",
+                "xpath=//button[contains(text(), 'Only accept essential cookies')]"
             ]
 
             for selector in decline_selectors:
@@ -466,9 +465,9 @@ class AmazonSellerScraper:
 
             # Try multiple selectors for the location element
             location_selectors = [
-                "//div[@id='glow-ingress-block']",
-                "//span[@id='nav-global-location-data-modal-action']",
-                "//a[@id='nav-global-location-popover-link']"
+                "xpath=//div[@id='glow-ingress-block']",
+                "xpath=//span[@id='nav-global-location-data-modal-action']",
+                "xpath=//a[@id='nav-global-location-popover-link']"
             ]
 
             location_selector = None
@@ -548,10 +547,10 @@ class AmazonSellerScraper:
             # Look for apply/update button with multiple possible selectors
             apply_button = None
             button_selectors = [
-                "//span[@id='GLUXZipUpdate']//input[@type='submit']",
-                "//input[@aria-labelledby='GLUXZipUpdate-announce']",
-                "//span[@id='GLUXZipUpdate']",
-                "//input[contains(@class, 'a-button-input') and contains(@aria-labelledby, 'GLUXZipUpdate')]"
+                "xpath=//span[@id='GLUXZipUpdate']//input[@type='submit']",
+                "xpath=//input[@aria-labelledby='GLUXZipUpdate-announce']",
+                "xpath=//span[@id='GLUXZipUpdate']",
+                "xpath=//input[contains(@class, 'a-button-input') and contains(@aria-labelledby, 'GLUXZipUpdate')]"
             ]
 
             for selector in button_selectors:
@@ -585,10 +584,10 @@ class AmazonSellerScraper:
             try:
                 # Try multiple selectors for the confirm button
                 confirm_selectors = [
-                    "//div[@class='a-popover-footer']//span[@data-action='GLUXConfirmAction']/input[@id='GLUXConfirmClose']",
-                    "//input[@id='GLUXConfirmClose']",
-                    "//button[contains(@class, 'a-button-primary') and contains(text(), 'Done')]",
-                    "//button[contains(@class, 'a-button-primary') and contains(text(), 'Continue')]"
+                    "xpath=//div[@class='a-popover-footer']//span[@data-action='GLUXConfirmAction']/input[@id='GLUXConfirmClose']",
+                    "xpath=//input[@id='GLUXConfirmClose']",
+                    "xpath=//button[contains(@class, 'a-button-primary') and contains(text(), 'Done')]",
+                    "xpath=//button[contains(@class, 'a-button-primary') and contains(text(), 'Continue')]"
                 ]
 
                 for selector in confirm_selectors:
@@ -616,8 +615,8 @@ class AmazonSellerScraper:
             try:
                 location_text = ""
                 location_elements = [
-                    "//div[@id='glow-ingress-block']",
-                    "//span[@id='glow-ingress-line2']"
+                    "xpath=//div[@id='glow-ingress-block']",
+                    "xpath=//span[@id='glow-ingress-line2']"
                 ]
 
                 for selector in location_elements:
@@ -673,10 +672,10 @@ class AmazonSellerScraper:
 
             # Click on location selector
             logger.info(f"Clicking on location selector to select country: {country_name}")
-            location_selector = await page.query_selector("//div[@id='glow-ingress-block']")
+            location_selector = await page.query_selector("xpath=//div[@id='glow-ingress-block']")
             if not location_selector:
                 logger.warning("Location selector not found, trying alternative selectors")
-                location_selector = await page.query_selector("//span[@id='nav-global-location-data-modal-action']")
+                location_selector = await page.query_selector("xpath=//span[@id='nav-global-location-data-modal-action']")
 
             if location_selector:
                 await location_selector.click()
@@ -713,7 +712,7 @@ class AmazonSellerScraper:
                             return False
 
                         # Click "Done" button if it exists
-                        done_button = await page.query_selector("//button[contains(@class, 'a-button-primary')]")
+                        done_button = await page.query_selector("xpath=//button[contains(@class, 'a-button-primary')]")
                         if done_button:
                             await done_button.click()
                             await self.random_delay(2.0, 3.0)
@@ -860,10 +859,10 @@ class AmazonSellerScraper:
         """
         try:
             # Find search box
-            search_box = await page.query_selector("//div[@class='nav-fill']//input[@id='twotabsearchtextbox']")
+            search_box = await page.query_selector("xpath=//div[@class='nav-fill']//input[@id='twotabsearchtextbox']")
             if not search_box:
                 logger.warning("Search box not found, trying alternative selector")
-                search_box = await page.query_selector("//input[@id='twotabsearchtextbox']")
+                search_box = await page.query_selector("xpath=//input[@id='twotabsearchtextbox']")
 
             if not search_box:
                 logger.error("Could not find search box")
@@ -891,11 +890,10 @@ class AmazonSellerScraper:
             await page.keyboard.press("Enter")
 
             logger.info("Waiting for search results to load")
-            await page.wait_for_selector('xpath=//span[@data-component-type="s-search-results"]', timeout=15000)
+            await page.wait_for_load_state("domcontentloaded")
 
-            logger.info("Search successful")
-            # Wait for search results to load
-            await page.wait_for_load_state("networkidle")
+            logger.info("Waiting for search results to load completely")
+            await page.wait_for_selector('xpath=//span[@data-component-type="s-search-results"]', timeout=15000)
 
             return True
 
@@ -1070,7 +1068,7 @@ class AmazonSellerScraper:
         """
         try:
             # Check if there's a seller link on the page
-            seller_link = await page.query_selector("//a[@id='sellerProfileTriggerId']")
+            seller_link = await page.query_selector("xpath=//a[@id='sellerProfileTriggerId']")
             if not seller_link:
                 logger.warning(f"No seller link found for product {product_asin}")
                 return None
@@ -1111,13 +1109,13 @@ class AmazonSellerScraper:
             logger.info(f"Navigating to seller page for {seller_id}")
             await seller_link.click()
 
-            # Wait for the seller page to load
-            await page.wait_for_load_state("networkidle")
+            # Wait specifically for seller information to appear rather than networkidle
+            await page.wait_for_selector("//h1[@id='seller-name']", timeout=10000)
             await self.random_delay()
 
             # Extract seller name
             try:
-                seller_name_element = await page.query_selector("//h1[@id='seller-name']")
+                seller_name_element = await page.query_selector("xpath=//h1[@id='seller-name']")
                 if seller_name_element:
                     seller_info.seller_name = await seller_name_element.text_content()
             except Exception as e:
@@ -1126,7 +1124,7 @@ class AmazonSellerScraper:
             # Extract business name
             try:
                 business_name_element = await page.query_selector(
-                    "//span[contains(text(), 'Business Name:')]/following-sibling::span")
+                    "xpath=//span[contains(text(), 'Business Name:')]/following-sibling::span")
                 if business_name_element:
                     seller_info.business_name = await business_name_element.text_content()
             except Exception as e:
@@ -1144,7 +1142,7 @@ class AmazonSellerScraper:
             # Extract trade registry number
             try:
                 registry_element = await page.query_selector(
-                    "//span[contains(text(), 'Trade Register Number:')]/following-sibling::span")
+                    "xpath=//span[contains(text(), 'Trade Register Number:')]/following-sibling::span")
                 if registry_element:
                     seller_info.trade_registry_number = await registry_element.text_content()
             except Exception as e:
@@ -1153,7 +1151,7 @@ class AmazonSellerScraper:
             # Extract phone number
             try:
                 phone_element = await page.query_selector(
-                    "//span[contains(text(), 'Phone number')]/following-sibling::span")
+                    "xpath=//span[contains(text(), 'Phone number')]/following-sibling::span")
                 if phone_element:
                     seller_info.phone_number = await phone_element.text_content()
             except Exception as e:
@@ -1161,7 +1159,7 @@ class AmazonSellerScraper:
 
             # Extract email
             try:
-                email_element = await page.query_selector("//span[contains(text(), 'Email')]/following-sibling::span")
+                email_element = await page.query_selector("xpath=//span[contains(text(), 'Email')]/following-sibling::span")
                 if email_element:
                     seller_info.email = await email_element.text_content()
             except Exception as e:
@@ -1170,7 +1168,7 @@ class AmazonSellerScraper:
             # Extract address
             try:
                 address_elements = await page.query_selector_all(
-                    "//div[@class='a-row a-spacing-none' and contains(span/text(), 'Business Address')]/following-sibling::div/span")
+                    "xpath=//div[@class='a-row a-spacing-none' and contains(span/text(), 'Business Address')]/following-sibling::div/span")
                 address_parts = []
                 for element in address_elements:
                     text = await element.text_content()
@@ -1185,10 +1183,10 @@ class AmazonSellerScraper:
             try:
                 # Look for the script tag containing rating data
                 rating_script = await page.query_selector(
-                    "//script[@data-a-state='{\\'key\\':\\\"lifetimeRatingsData\\\"}'")
+                    "xpath=//script[@data-a-state='{\\'key\\':\\\"lifetimeRatingsData\\\"}'")
                 if not rating_script:
                     rating_script = await page.query_selector(
-                        "//script[contains(@data-a-state, 'lifetimeRatingsData')]")
+                        "xpath=//script[contains(@data-a-state, 'lifetimeRatingsData')]")
 
                 if rating_script:
                     script_content = await rating_script.get_attribute("data-a-state")
@@ -1297,11 +1295,11 @@ class AmazonSellerScraper:
         try:
             # Check for common CAPTCHA indicators
             captcha_indicators = [
-                "//form[contains(@action, 'validateCaptcha')]",
-                "//input[@id='captchacharacters']",
-                "//div[contains(text(), 'Enter the characters you see')]",
-                "//div[contains(text(), 'Type the characters you see')]",
-                "//div[contains(text(), 'Bot check')]"
+                "xpath=//form[contains(@action, 'validateCaptcha')]",
+                "xpath=//input[@id='captchacharacters']",
+                "xpath=//div[contains(text(), 'Enter the characters you see')]",
+                "xpath=//div[contains(text(), 'Type the characters you see')]",
+                "xpath=//div[contains(text(), 'Bot check')]"
             ]
 
             for selector in captcha_indicators:
@@ -1520,7 +1518,7 @@ class AmazonSellerScraper:
                     product_links = await self.get_product_links_with_pagination(
                         page,
                         1000000,
-                        max_pages=1000  # Adjust based on your needs
+                        max_pages=2  # Adjust based on your needs
                     )
 
                     if not product_links:
@@ -1542,40 +1540,33 @@ class AmazonSellerScraper:
                         url = product["url"]
                         logger.info(f"Processing product {asin}: {url}")
 
+
                         try:
-                            # Create a new page using the existing browser instance
-                            page = await browser.new_page()
+                            # Navigate to product page
+                            await page.goto(url, wait_until="domcontentloaded")
+                            await page.wait_for_selector("//span[@id='productTitle']", timeout=10000)
 
-                            try:
-                                # Navigate to product page
-                                await page.goto(url, wait_until="domcontentloaded")
-                                await page.wait_for_selector("//span[@id='productTitle']", timeout=10000)
+                            # Check for content availability
+                            if not await self.check_content_availability(page):
+                                logger.warning(f"Content unavailable on product page {asin}, skipping")
+                                continue
 
-                                # Check for content availability
-                                if not await self.check_content_availability(page):
-                                    logger.warning(f"Content unavailable on product page {asin}, skipping")
-                                    continue
+                            # Check for CAPTCHA
+                            if not await self.handle_captcha(page):
+                                logger.error(f"CAPTCHA detected on product page for {asin}, retrying with backoff")
+                                # Take a longer break to avoid triggering more CAPTCHAs
+                                await self.random_delay(3.0, 5.0)
+                                continue
 
-                                # Check for CAPTCHA
-                                if not await self.handle_captcha(page):
-                                    logger.error(f"CAPTCHA detected on product page for {asin}, retrying with backoff")
-                                    # Take a longer break to avoid triggering more CAPTCHAs
-                                    await self.random_delay(3.0, 5.0)
-                                    continue
+                            # Extract seller information
+                            seller_info = await self.extract_seller_info(page, asin, country_code, category_name,
+                                                                         domain)
+                            if seller_info:
+                                sellers_batch.append(seller_info)
+                                logger.info(f"Added seller info for {seller_info.seller_id}")
 
-                                # Extract seller information
-                                seller_info = await self.extract_seller_info(page, asin, country_code, category_name,
-                                                                             domain)
-                                if seller_info:
-                                    sellers_batch.append(seller_info)
-                                    logger.info(f"Added seller info for {seller_info.seller_id}")
-
-                                # Take a short random delay between products to appear more human-like
-                                await self.random_delay(1.0, 2.0)
-
-                            finally:
-                                # Always close the page to free up resources
-                                await page.close()
+                            # Take a short random delay between products to appear more human-like
+                            await self.random_delay(1.0, 2.0)
 
                         except Exception as e:
                             logger.error(f"Error processing product {asin}: {str(e)}")
