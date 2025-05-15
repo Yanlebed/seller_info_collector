@@ -14,6 +14,20 @@ A flexible, high-performance web scraper for gathering Amazon seller data across
 - **Robust Error Handling**: Automatic retries and recovery from errors
 - **Cookie Management**: Saves and reuses cookies to maintain sessions and avoid CAPTCHAs
 
+## Data Collected
+
+For each seller, the scraper collects the following information:
+- Seller ID and name
+- Business name and type
+- Trade registry number
+- Contact information (phone number, email)
+- Business address
+- Seller rating and rating count
+- Country and product category
+- Amazon store URL
+- Associated product ASIN
+- Timestamp of collection
+
 ## Installation
 
 ### Prerequisites
@@ -70,7 +84,12 @@ http://user123:pass456@proxy1.example.com:8080
 http://user456:pass789@proxy2.example.com:8080
 ```
 
-The script will automatically load and manage these proxies, prioritizing those with better performance based on success rate, response time, and recency.
+The script will automatically load and manage these proxies, prioritizing those with better performance based on success rate, response time, and recency. The proxy scoring system keeps track of:
+
+- Success and failure rates
+- Average response time
+- Time since last successful use
+- Whether cookies have been verified
 
 ### CAPTCHA Solving
 
@@ -149,6 +168,19 @@ python main.py --no-headless
    - Handle CAPTCHAs if encountered
 5. Results are saved to both JSON and Excel files in the `seller_data` directory
 
+## Rate Limiting and Anti-Detection
+
+To avoid being blocked by Amazon's anti-scraping measures, the scraper implements several strategies:
+
+1. **Human-like behavior**: Random delays between actions, realistic mouse movements, and natural scrolling patterns
+2. **Browser fingerprinting**: Uses Camoufox to randomize browser fingerprints
+3. **Cookie management**: Saves and reuses valid cookies to maintain sessions
+4. **Proxy rotation**: Intelligently rotates proxies based on performance metrics
+5. **Error handling**: Automatically detects and handles CAPTCHAs and other anti-bot challenges
+6. **Adaptive delays**: Increases wait times when encountering rate limiting
+
+For best results, use residential proxies and avoid aggressive scraping patterns.
+
 ## Extending the Project
 
 ### Adding a New Country
@@ -175,9 +207,28 @@ COUNTRY_CONFIGS = {
 
 If Amazon's UI changes or you need to support a unique country variant, you can add custom selectors in the `AmazonSellerScraper` class in `main.py`.
 
+The script uses XPath selectors for most elements. To identify new selectors:
+
+1. Use browser developer tools to inspect the target element
+2. Create an XPath that uniquely identifies the element
+3. Update the relevant method in the scraper class
+
+### Customizing Data Collection
+
+To collect additional seller information:
+
+1. Update the `SellerInfo` class in `models.py` with new fields
+2. Modify the `extract_seller_info` and related methods in `main.py` to scrape the new data
+3. Update the `to_dict` method to include the new fields in output files
+
 ### Improving CAPTCHA Handling
 
-To enhance CAPTCHA solving capabilities, you can extend the `CaptchaSolver` class in `captcha_solver.py`.
+To enhance CAPTCHA solving capabilities, you can extend the `CaptchaSolver` class in `captcha_solver.py`. The current implementation handles text-based CAPTCHAs, but could be expanded to support:
+
+- Image-based CAPTCHAs
+- Puzzle CAPTCHAs
+- Audio CAPTCHAs
+- Alternative CAPTCHA solving services
 
 ## Troubleshooting
 
@@ -185,19 +236,62 @@ To enhance CAPTCHA solving capabilities, you can extend the `CaptchaSolver` clas
 
 1. **Browser Fails to Launch**
    - Ensure you've installed Playwright's browser dependencies
-   - On Linux, you may need additional system libraries
+   - On Linux, you may need additional system libraries:
+     ```bash
+     sudo apt-get install libgbm1 libasound2 libatk1.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgcc1 libgconf-2-4 libgdk-pixbuf2.0-0 libglib2.0-0 libgtk-3-0 libnspr4 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 libnss3
+     ```
 
 2. **Proxies Not Working**
    - Verify proxy format in `proxies.txt`
    - Check proxy credentials and connectivity
    - Ensure proxies have appropriate permissions for Amazon
+   - Try using residential proxies instead of datacenter proxies
+   - Verify that your proxies support HTTPS connections
 
 3. **High CAPTCHA Rate**
    - Try using residential proxies
-   - Reduce request frequency
+   - Reduce request frequency by increasing delay ranges in the code
    - Ensure browser fingerprint randomization is working correctly
    - Update the Camoufox configuration
+   - Avoid using the same proxy too frequently
+
+4. **Missing Seller Information**
+   - Amazon's seller pages vary by country and can change layout
+   - Check the selector patterns in `extract_seller_info` method
+   - Add additional selectors to handle variations in the page structure
+   - Try different product categories (some may have more seller info)
+
+5. **Connection Timeouts**
+   - Increase timeout values in the code
+   - Check proxy connection stability
+   - Reduce concurrency with `--max-concurrency` parameter
+   - Inspect network activity to identify bottlenecks
 
 ### Logging
 
-Logs are stored in `amazon_seller_scraper.log` and contain detailed information about the scraping process, including errors and warnings.
+Logs are stored in `amazon_seller_scraper.log` and contain detailed information about the scraping process, including errors and warnings. Set the logging level to DEBUG for more detailed information:
+
+```python
+logging.basicConfig(
+    level=logging.DEBUG,  # Change from INFO to DEBUG
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('amazon_seller_scraper.log'),
+        logging.StreamHandler()
+    ]
+)
+```
+
+### Debugging With Screenshots
+
+The scraper automatically takes screenshots when encountering CAPTCHAs or errors. These are saved in the `screenshots` directory and can be helpful for diagnosing issues.
+
+## Performance Optimization
+
+To improve scraping performance:
+
+1. Increase concurrency with `--max-concurrency` (careful not to trigger rate limits)
+2. Use high-quality residential proxies
+3. Optimize delays in the `random_delay` method based on your connection
+4. Maintain a healthy cookie database to reduce authentication challenges
+5. Focus on specific countries or categories rather than scraping everything at once
