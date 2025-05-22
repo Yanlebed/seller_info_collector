@@ -44,22 +44,6 @@ COOKIE_VALIDITY_DAYS = 7  # Consider cookies valid for 7 days
 
 # Country configurations
 COUNTRY_CONFIGS = {
-    "uk": {
-        "domain": "amazon.co.uk",
-        "postcode": "SE24 0AA",
-        "category_url": "https://www.amazon.co.uk/s?k=fridge+freezer",
-        "category_name": "Fridge Freezer",
-        "category_query": "fridge freezer",
-        "use_postcode": True
-    },
-    "sweden": {
-        "domain": "amazon.se",
-        "postcode": "112 19",
-        "category_url": "https://www.amazon.se/s?k=elektrisk+v%C3%A4rmare&language=en_GB",
-        "category_name": "Electric Heater",
-        "category_query": "elektrisk värmare",
-        "use_postcode": True
-    },
     "finland": {
         "domain": "amazon.com",
         "country_name": "Finland",
@@ -80,7 +64,23 @@ COUNTRY_CONFIGS = {
         "category_url": "https://www.amazon.com/s?k=photo+camera&i=photo&crid=9MUTL9HQL4DN&sprefix=pho%2Cphoto%2C164&ref=nb_sb_ss_ts-doa-p_1_3",
         "category_name": "Photo Camera",
         "use_postcode": False
-    }
+    },
+    "uk": {
+        "domain": "amazon.co.uk",
+        "postcode": "SE24 0AA",
+        "category_url": "https://www.amazon.co.uk/s?k=fridge+freezer",
+        "category_name": "Fridge Freezer",
+        "category_query": "fridge freezer",
+        "use_postcode": True
+    },
+    "sweden": {
+        "domain": "amazon.se",
+        "postcode": "112 19",
+        "category_url": "https://www.amazon.se/s?k=elektrisk+v%C3%A4rmare&language=en_GB",
+        "category_name": "Electric Heater",
+        "category_query": "elektrisk värmare",
+        "use_postcode": True
+    },
 }
 
 
@@ -1026,6 +1026,7 @@ class AmazonSellerScraper:
                         address=row.get('address', ''),
                         rating=row.get('rating', 0.0),
                         rating_count=row.get('rating_count', 0),
+                        product_count=row.get('product_count', ''),  # Add product_count field
                         country=row.get('country', ''),
                         category=row.get('category', ''),
                         amazon_store_url=row.get('amazon_store_url', ''),
@@ -1436,6 +1437,107 @@ class AmazonSellerScraper:
             except Exception as e:
                 logger.warning(f"Error extracting address: {str(e)}")
 
+            # Extract product count by clicking "See all products" link
+            try:
+                logger.info(f"Attempting to extract product count for seller {seller_id}")
+
+                # Look for "See all products" link
+                see_all_products_link = await page.query_selector("xpath=//a[contains(text(), 'See all products')]")
+
+                if see_all_products_link:
+                    logger.info(f"Found 'See all products' link for seller {seller_id}, clicking it")
+
+                    # Move mouse to the link with randomization
+                    box = await see_all_products_link.bounding_box()
+                    if box:
+                        x_position = box["x"] + random.uniform(5, box["width"] - 5)
+                        y_position = box["y"] + random.uniform(5, box["height"] - 5)
+
+                        await page.mouse.move(x_position, y_position)
+                        await self.random_delay(0.2, 0.5)
+                        await page.mouse.click(x_position, y_position)
+
+                        # Wait for the products page to load
+                        await page.wait_for_load_state("domcontentloaded")
+                        await self.random_delay(1.0, 2.0)
+
+                        # Extract product count from results text
+                        results_element = await page.query_selector("xpath=//h2/span[contains(text(), 'results')]")
+
+                        if results_element:
+                            results_text = await results_element.text_content()
+                            logger.info(f"Found results text: '{results_text}' for seller {seller_id}")
+
+                            # Parse the results text to extract product count
+                            # Examples: "1-16 of 685 results", "1-16 of over 1,000 results"
+                            if results_text:
+                                # Use regex to extract the count
+                                # Pattern 1: "X-Y of Z results" -> extract Z
+                                match1 = re.search(r'of\s+([0-9,]+)\s+results', results_text)
+                                if match1:
+                                    seller_info.product_count = match1.group(1).replace(',', '')
+                                    logger.info(
+                                        f"Extracted product count: {seller_info.product_count} for seller {seller_id}")
+                                else:
+                                    # Pattern 2: "X-Y of over Z results" -> extract "over Z"
+                                    match2 = re.search(r'of\s+(over\s+[0-9,]+)\s+results', results_text)
+                                    if match2:
+                                        seller_info.product_count = match2.group(1).replace(',', '')
+                                        logger.info(
+                                            f"Extracted product count: {seller_info.product_count} for seller {seller_id}")
+                                    else:
+                                        # Try to extract any number from the text as fallback
+                                        numbers = re.findall(r'[0-9,]+', results_text)
+                                        if numbers:
+                                            # Take the last number which is usually the total count
+                                            seller_info.product_count = numbers[-1].replace(',', '')
+                                            logger.info(
+                                                f"Extracted product count (fallback): {seller_info.product_count} for seller {seller_id}")
+                                        else:
+                                            seller_info.product_count = "unknown"
+                                            logger.warning(
+                                                f"Could not parse product count from: '{results_text}' for seller {seller_id}")
+                        else:
+                            logger.warning(f"Results element not found for seller {seller_id}")
+                            seller_info.product_count = "not_found"
+
+                            # Try alternative selectors
+                            alt_selectors = [
+                                "xpath=//span[contains(text(), 'results')]",
+                                "xpath=//*[contains(text(), 'results')]",
+                                "xpath=//div[contains(@class, 'a-section') and contains(text(), 'results')]"
+                            ]
+
+                            for selector in alt_selectors:
+                                alt_element = await page.query_selector(selector)
+                                if alt_element:
+                                    results_text = await alt_element.text_content()
+                                    logger.info(
+                                        f"Found alternative results text: '{results_text}' for seller {seller_id}")
+
+                                    if results_text and 'results' in results_text:
+                                        # Try to extract number
+                                        match1 = re.search(r'of\s+([0-9,]+)\s+results', results_text)
+                                        if match1:
+                                            seller_info.product_count = match1.group(1).replace(',', '')
+                                            logger.info(
+                                                f"Extracted product count from alternative: {seller_info.product_count} for seller {seller_id}")
+                                            break
+                                        else:
+                                            match2 = re.search(r'of\s+(over\s+[0-9,]+)\s+results', results_text)
+                                            if match2:
+                                                seller_info.product_count = match2.group(1).replace(',', '')
+                                                logger.info(
+                                                    f"Extracted product count from alternative: {seller_info.product_count} for seller {seller_id}")
+                                                break
+                else:
+                    logger.warning(f"'See all products' link not found for seller {seller_id}")
+                    seller_info.product_count = "link_not_found"
+
+            except Exception as e:
+                logger.warning(f"Error extracting product count for seller {seller_id}: {str(e)}")
+                seller_info.product_count = "error"
+
             # Extract seller rating data
             try:
                 # Use XPath to find the script with rating data
@@ -1577,7 +1679,8 @@ class AmazonSellerScraper:
             except Exception as e:
                 logger.warning(f"Error extracting rating data via JavaScript: {str(e)}")
 
-            logger.info(f"Successfully extracted seller info for {seller_id}")
+            logger.info(
+                f"Successfully extracted seller info for {seller_id} with product count: {seller_info.product_count}")
             return seller_info
 
         except Exception as e:
@@ -1732,7 +1835,8 @@ class AmazonSellerScraper:
                 logger.info(f"Current category page URL: {category_page_url}")
 
                 # Wait for the page to load
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded")
+                await page.wait_for_selector('//span[@data-component-type="s-search-results"]')
 
                 # Scroll the page to load all content
                 await self.human_scroll(page)
@@ -1938,6 +2042,106 @@ class AmazonSellerScraper:
                                 except Exception as e:
                                     logger.warning(f"Error extracting address: {str(e)}")
 
+                                # Extract product count by clicking "See all products" link
+                                try:
+                                    logger.info(f"Attempting to extract product count for seller {seller_id}")
+
+                                    # Look for "See all products" link
+                                    see_all_products_link = await page.query_selector(
+                                        "//a[contains(text(), 'See all products')]")
+
+                                    if see_all_products_link:
+                                        logger.info(
+                                            f"Found 'See all products' link for seller {seller_id}, clicking it")
+                                        see_all_products_link_href = await see_all_products_link.get_attribute("href")
+                                        logger.info(f"'See all products' link href: https://{domain}{see_all_products_link_href}")
+                                        await page.goto(f'https://{domain}{see_all_products_link_href}', wait_until="domcontentloaded")
+                                        await page.wait_for_selector("//h2/span[contains(text(), 'results')]")
+
+                                        # Extract product count from results text
+                                        results_element = await page.query_selector(
+                                            "xpath=//h2/span[contains(text(), 'results')]")
+
+                                        if results_element:
+                                            results_text = await results_element.text_content()
+                                            logger.info(
+                                                f"Found results text: '{results_text}' for seller {seller_id}")
+
+                                            # Parse the results text to extract product count
+                                            # Examples: "1-16 of 685 results", "1-16 of over 1,000 results"
+                                            if results_text:
+                                                # Use regex to extract the count
+                                                # Pattern 1: "X-Y of Z results" -> extract Z
+                                                match1 = re.search(r'of\s+([0-9,]+)\s+results', results_text)
+                                                if match1:
+                                                    seller_info.product_count = match1.group(1).replace(',', '')
+                                                    logger.info(
+                                                        f"Extracted product count: {seller_info.product_count} for seller {seller_id}")
+                                                else:
+                                                    # Pattern 2: "X-Y of over Z results" -> extract "over Z"
+                                                    match2 = re.search(r'of\s+(over\s+[0-9,]+)\s+results',
+                                                                       results_text)
+                                                    if match2:
+                                                        seller_info.product_count = match2.group(1).replace(',', '')
+                                                        logger.info(
+                                                            f"Extracted product count: {seller_info.product_count} for seller {seller_id}")
+                                                    else:
+                                                        # Try to extract any number from the text as fallback
+                                                        numbers = re.findall(r'[0-9,]+', results_text)
+                                                        if numbers:
+                                                            # Take the last number which is usually the total count
+                                                            seller_info.product_count = numbers[-1].replace(',', '')
+                                                            logger.info(
+                                                                f"Extracted product count (fallback): {seller_info.product_count} for seller {seller_id}")
+                                                        else:
+                                                            seller_info.product_count = "unknown"
+                                                            logger.warning(
+                                                                f"Could not parse product count from: '{results_text}' for seller {seller_id}")
+                                        else:
+                                            logger.warning(f"Results element not found for seller {seller_id}")
+                                            seller_info.product_count = "not_found"
+
+                                            # Try alternative selectors
+                                            alt_selectors = [
+                                                "xpath=//span[contains(text(), 'results')]",
+                                                "xpath=//*[contains(text(), 'results')]",
+                                                "xpath=//div[contains(@class, 'a-section') and contains(text(), 'results')]"
+                                            ]
+
+                                            for selector in alt_selectors:
+                                                alt_element = await page.query_selector(selector)
+                                                if alt_element:
+                                                    results_text = await alt_element.text_content()
+                                                    logger.info(
+                                                        f"Found alternative results text: '{results_text}' for seller {seller_id}")
+
+                                                    if results_text and 'results' in results_text:
+                                                        # Try to extract number
+                                                        match1 = re.search(r'of\s+([0-9,]+)\s+results',
+                                                                           results_text)
+                                                        if match1:
+                                                            seller_info.product_count = match1.group(1).replace(',',
+                                                                                                                '')
+                                                            logger.info(
+                                                                f"Extracted product count from alternative: {seller_info.product_count} for seller {seller_id}")
+                                                            break
+                                                        else:
+                                                            match2 = re.search(r'of\s+(over\s+[0-9,]+)\s+results',
+                                                                               results_text)
+                                                            if match2:
+                                                                seller_info.product_count = match2.group(1).replace(
+                                                                    ',', '')
+                                                                logger.info(
+                                                                    f"Extracted product count from alternative: {seller_info.product_count} for seller {seller_id}")
+                                                                break
+                                    else:
+                                        logger.warning(f"'See all products' link not found for seller {seller_id}")
+                                        seller_info.product_count = "link_not_found"
+
+                                except Exception as e:
+                                    logger.warning(f"Error extracting product count for seller {seller_id}: {str(e)}")
+                                    seller_info.product_count = "error"
+
                                 # Extract seller rating data with XPath
                                 try:
                                     # Use XPath to find the script with rating data
@@ -2069,7 +2273,8 @@ class AmazonSellerScraper:
 
                                 # Add seller info to list
                                 sellers_found.append(seller_info)
-                                logger.info(f"Added seller info for {seller_id}")
+                                logger.info(
+                                    f"Added seller info for {seller_id} with product count: {seller_info.product_count}")
 
                             except Exception as e:
                                 logger.error(f"Error processing seller URL {seller_url}: {str(e)}")
@@ -2342,7 +2547,7 @@ class AmazonSellerScraper:
             logger.error(f"Error during product processing by page: {str(e)}")
             return sellers_found
 
-    async def scrape_sellers_for_country(self, country_code: str, max_retries: int = 5) -> List[SellerInfo]:
+    async def scrape_sellers_for_country(self, country_code: str, max_retries: int = 10) -> List[SellerInfo]:
         """
         Scrape seller information for a specific country with retry logic
 
@@ -2667,6 +2872,13 @@ class AmazonSellerScraper:
             complete_info = sum(1 for seller in sellers
                                 if seller.business_name and seller.address)
             print(f"  Sellers with complete info: {complete_info} ({(complete_info / len(sellers) * 100):.1f}%)")
+
+            # Count sellers with product count information
+            product_count_info = sum(1 for seller in sellers
+                                     if seller.product_count and seller.product_count not in ['', 'error', 'not_found',
+                                                                                              'link_not_found'])
+            print(
+                f"  Sellers with product count: {product_count_info} ({(product_count_info / len(sellers) * 100):.1f}%)")
 
         print("=" * 60)
 
