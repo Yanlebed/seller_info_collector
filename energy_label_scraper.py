@@ -8,46 +8,21 @@ It specifically:
 - SKIPS products with formal energy efficiency labels
 - PROCESSES products without formal labels (including those with only energy text)
 - Collects brand, seller, and product information
+- Sets location using postcodes for accurate results
+- Uses language=en_GB parameter to standardize energy label detection across all marketplaces
+
+Language standardization:
+- Without language parameter, different marketplaces show energy labels in local languages:
+  * France: "Classe d'efficacité énergétique"
+  * Spain: "Clase de eficiencia energética"
+  * Netherlands: "Energie-efficiëntieklasse"
+  * Sweden/Italy: "Energy Efficiency Class"
+- With language=en_GB, all marketplaces show "Energy Efficiency Class" in English
 
 Output files:
 - products_without_formal_energy_labels.xlsx: Detailed product information
 - brands_without_formal_energy_labels_summary.xlsx: List of brands per marketplace
 - brands_without_formal_labels_analysis.xlsx: Brand analysis with product counts
-"""
-
-#!/usr/bin/env python3
-"""
-Amazon Energy Label Brand Scraper
-
-This script scrapes Amazon marketplaces to identify products WITHOUT formal energy efficiency labels
-in categories that typically require energy labels.
-
-It specifically:
-- SKIPS products with formal energy efficiency labels
-- PROCESSES products without formal labels (including those with only energy text)
-- Collects brand, seller, and product information
-- Handles intermediate pages on Amazon.it, Amazon.es, and Amazon.fr
-
-Output files structure:
-energy_label_data/
-├── {country}/
-│   ├── {country}_products_without_formal_energy_labels.xlsx
-│   ├── {country}_brands_summary.xlsx
-│   └── {country}_brand_analysis.xlsx
-├── all_products_without_formal_energy_labels.xlsx
-├── all_brands_without_formal_energy_labels_summary.xlsx
-├── all_brands_without_formal_labels_analysis.xlsx
-├── overall_country_summary.xlsx
-└── overall_category_summary.xlsx
-
-Special handling for:
-- Amazon.it: Clicks "Clicca qui per tornare alla home page di Amazon.it" when present
-- Amazon.es: Clicks "Seguir comprando" button when present
-- Amazon.fr: Clicks "Continuer les achats" button when present
-
-Cookie handling:
-- Amazon.it: Clicks button[@aria-label="Rifiuta"]
-- Amazon.es, Amazon.nl, Amazon.fr: Clicks button[@id="sp-cc-rejectall-link"]
 """
 
 import asyncio
@@ -58,7 +33,7 @@ import os
 import time
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Tuple, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 
 from camoufox.async_api import AsyncCamoufox
@@ -117,35 +92,44 @@ class ProductInfo:
             "timestamp": self.timestamp
         }
 
-# Country and category configurations
+# Country and category configurations with postcodes
 COUNTRY_CONFIGS = {
     "sweden": {
         "domain": "amazon.se",
         "country_code": "SE",
-        "locale": "sv-SE"
+        "locale": "sv-SE",
+        "use_postcode": True,
+        "postcode": "112 19"
     },
     "france": {
         "domain": "amazon.fr",
         "country_code": "FR",
         "locale": "fr-FR",
+        "use_postcode": True,
+        "postcode": "75017",
         "note": "May show intermediate page with 'Continuer les achats' button"
     },
     "italy": {
         "domain": "amazon.it",
         "country_code": "IT",
         "locale": "it-IT",
+        "use_postcode": True,
+        "postcode": "00195",
         "note": "May show intermediate page with 'Clicca qui per tornare alla home page' link"
     },
     "spain": {
         "domain": "amazon.es",
         "country_code": "ES",
         "locale": "es-ES",
+        "use_postcode": True,
+        "postcode": "28055",
         "note": "May show intermediate page with 'Seguir comprando' button"
     },
     "netherlands": {
         "domain": "amazon.nl",
         "country_code": "NL",
-        "locale": "nl-NL"
+        "locale": "nl-NL",
+        "use_postcode": False  # Netherlands handles location automatically
     }
 }
 
@@ -275,12 +259,9 @@ class EnergyLabelScraper:
     2. PROCESSES products without formal labels, including:
        - Products with energy text only (Energy Efficiency Class: text without formal label)
        - Products with no energy information at all
+    3. Uses language=en_GB parameter to standardize energy label text across all marketplaces
 
     The goal is to identify brands selling products that should have energy labels but don't.
-
-    Results are saved:
-    - Per country in separate subdirectories
-    - Overall summaries for cross-country comparison
     """
     def __init__(self,
                  proxy_manager: Optional[ProxyManager] = None,
@@ -333,13 +314,6 @@ class EnergyLabelScraper:
         Amazon.fr sometimes shows a page with "Continuer les achats" button
 
         These pages appear randomly and need to be clicked through to reach the actual site.
-
-        Args:
-            page: Playwright page object
-            domain: Amazon domain (e.g., "amazon.it", "amazon.es", "amazon.fr")
-
-        Returns:
-            bool: True if intermediate page was handled, False if not found
         """
         try:
             # Amazon.it intermediate page
@@ -386,14 +360,41 @@ class EnergyLabelScraper:
         except Exception as e:
             logger.error(f"Error handling intermediate page: {str(e)}")
             return False
-        """Handle cookie consent banner"""
+
+    async def handle_cookie_banner(self, page: Page) -> bool:
+        """
+        Handle cookie consent banner
+
+        Cookie decline buttons by country:
+        - Italy: button[@aria-label="Rifiuta"]
+        - Spain, Netherlands, France: button[@id="sp-cc-rejectall-link"]
+        - Others: Various fallback selectors
+        """
         try:
             decline_selectors = [
+                # Italy specific - Primary selector
+                "xpath=//button[@aria-label='Rifiuta']",  # Italian "Reject" button
+
+                # Spain, Netherlands, France specific - Primary selector
+                "xpath=//button[@id='sp-cc-rejectall-link']",  # Common for ES, NL, FR
+
+                # Generic and fallback selectors
                 "xpath=//button[@aria-label='Decline']",
                 "xpath=//input[@id='sp-cc-rejectall-link']",
                 "xpath=//a[@id='sp-cc-rejectall-link']",
+                "xpath=//span[@id='sp-cc-rejectall-link']",
+                "xpath=//button[@data-action='sp-cc-reject-all']",
                 "xpath=//button[contains(text(), 'Reject all')]",
-                "xpath=//button[contains(text(), 'Decline')]"
+                "xpath=//button[contains(text(), 'Decline')]",
+                "xpath=//button[contains(text(), 'Reject All')]",
+                "xpath=//button[contains(text(), 'Decline All')]",
+
+                # Additional language-specific text selectors as fallback
+                "xpath=//button[contains(text(), 'Rifiuta tutto')]",  # Italian
+                "xpath=//button[contains(text(), 'Tout refuser')]",  # French
+                "xpath=//button[contains(text(), 'Rechazar todo')]",  # Spanish
+                "xpath=//button[contains(text(), 'Alles afwijzen')]",  # Dutch
+                "xpath=//button[contains(text(), 'Avvisa alla')]"  # Swedish
             ]
 
             for selector in decline_selectors:
@@ -401,14 +402,241 @@ class EnergyLabelScraper:
                 if decline_button:
                     is_visible = await decline_button.is_visible()
                     if is_visible:
-                        logger.info(f"Found cookie decline button, clicking it")
+                        logger.info(f"Found cookie decline button with selector: {selector}")
                         await decline_button.click()
                         await self.random_delay(0.5, 1.0)
                         return True
 
+            logger.info("No cookie banner found or already handled")
             return True
         except Exception as e:
             logger.error(f"Error handling cookie banner: {str(e)}")
+            return False
+
+    async def set_location_by_postcode(self, page: Page, postcode: str, category_url: Optional[str] = None) -> bool:
+        """
+        Set the delivery location using a postcode with human-like interactions.
+        Adapted from main.py for energy label scraper.
+        """
+        try:
+            # Wait for the page to load completely
+            await page.wait_for_load_state("networkidle")
+
+            # Check if location selector exists
+            logger.info(f"Looking for location selector to set postcode: {postcode}")
+
+            # Check for location block first
+            location_block = await page.query_selector("xpath=//div[@id='nav-global-location-slot']")
+
+            # If location block is not found on the main page and we have a category URL, try there
+            if not location_block and category_url:
+                logger.info(f"Location block not found on main page. Navigating to category page: {category_url}")
+                # Add language parameter to category URL
+                category_url_with_lang = self.add_language_param(category_url)
+                await page.goto(category_url_with_lang, wait_until="networkidle")
+                await self.handle_cookie_banner(page)
+                location_block = await page.query_selector("xpath=//div[@id='nav-global-location-slot']")
+
+                if not location_block:
+                    logger.warning("Location block not found on category page either")
+                    return False
+
+            # Try multiple selectors for the location element
+            location_selectors = [
+                "xpath=//div[@id='glow-ingress-block']",
+                "xpath=//span[@id='nav-global-location-data-modal-action']",
+                "xpath=//a[@id='nav-global-location-popover-link']"
+            ]
+
+            location_selector = None
+            for selector in location_selectors:
+                element = await page.query_selector(selector)
+                if element:
+                    is_visible = await element.is_visible()
+                    if is_visible:
+                        location_selector = element
+                        logger.info(f"Found visible location selector: {selector}")
+                        break
+
+            if not location_selector:
+                logger.error("Could not find any visible location selector")
+                return False
+
+            # Click on location selector
+            await location_selector.click()
+            await self.random_delay()
+
+            # Check for dual-field postcode input (like Sweden)
+            postcode_inputs = await page.query_selector_all("xpath=//input[contains(@id, 'GLUXZipUpdateInput')]")
+
+            if len(postcode_inputs) == 2:
+                logger.info("Detected dual-field postcode input form (like Sweden)")
+
+                # Split the postcode by space
+                postcode_parts = postcode.strip().split()
+                if len(postcode_parts) != 2:
+                    logger.warning(f"Postcode '{postcode}' doesn't match the expected format for dual-field input")
+                    # Try to split it in the middle if it doesn't have a space
+                    if ' ' not in postcode and len(postcode) > 2:
+                        midpoint = len(postcode) // 2
+                        postcode_parts = [postcode[:midpoint], postcode[midpoint:]]
+                    else:
+                        postcode_parts = [postcode, ""]
+
+                # Enter first part
+                first_input = postcode_inputs[0]
+                await first_input.click()
+                await self.random_delay(0.1, 0.3)
+                await first_input.fill("")
+                await self.random_delay(0.1, 0.3)
+
+                # Type first part
+                for char in postcode_parts[0]:
+                    await page.keyboard.type(char)
+                    await self.random_delay(0.05, 0.15)
+
+                await self.random_delay(0.3, 0.6)
+
+                # Enter second part
+                second_input = postcode_inputs[1]
+                await second_input.click()
+                await self.random_delay(0.1, 0.3)
+                await second_input.fill("")
+                await self.random_delay(0.1, 0.3)
+
+                # Type second part
+                for char in postcode_parts[1]:
+                    await page.keyboard.type(char)
+                    await self.random_delay(0.05, 0.15)
+
+                # Find and click apply button
+                apply_button = await page.query_selector("xpath=//span[@id='GLUXZipUpdate']//input[@type='submit']")
+                if not apply_button:
+                    apply_button = await page.query_selector("xpath=//span[@id='GLUXZipUpdate']")
+
+                if apply_button:
+                    await apply_button.click()
+                    await self.random_delay(0.5, 1.0)
+
+            else:
+                # Handle single field postcode input
+                # Try multiple selectors for the zip input field
+                zip_input = None
+                zip_selectors = [
+                    "xpath=//div[@id='GLUXZipInputSection']/div/input",
+                    "xpath=//input[@autocomplete='postal-code']",
+                    "xpath=//input[@id='GLUXZipUpdateInput']"
+                ]
+
+                for selector in zip_selectors:
+                    try:
+                        element = await page.wait_for_selector(selector, timeout=5000)
+                        if element:
+                            is_visible = await element.is_visible()
+                            if is_visible:
+                                zip_input = element
+                                logger.info(f"Found visible zip input: {selector}")
+                                break
+                    except Exception as e:
+                        logger.debug(f"Selector {selector} not found: {str(e)}")
+
+                if not zip_input:
+                    logger.error("Could not find the zip code input field")
+                    return False
+
+                # Click and fill postcode
+                await zip_input.click()
+                await self.random_delay(0.3, 0.7)
+                await zip_input.fill("")
+                await self.random_delay(0.2, 0.4)
+
+                # Type postcode character by character
+                for char in postcode:
+                    await page.keyboard.type(char)
+                    await self.random_delay(0.05, 0.2)
+
+                await self.random_delay(0.5, 1.0)
+
+                # Find and click apply button
+                apply_button = None
+                button_selectors = [
+                    "xpath=//span[@id='GLUXZipUpdate']//input[@type='submit']",
+                    "xpath=//input[@aria-labelledby='GLUXZipUpdate-announce']",
+                    "xpath=//span[@id='GLUXZipUpdate']",
+                    "xpath=//input[contains(@class, 'a-button-input') and contains(@aria-labelledby, 'GLUXZipUpdate')]"
+                ]
+
+                for selector in button_selectors:
+                    element = await page.query_selector(selector)
+                    if element:
+                        is_visible = await element.is_visible()
+                        if is_visible:
+                            apply_button = element
+                            logger.info(f"Found visible apply button: {selector}")
+                            break
+
+                if apply_button:
+                    await apply_button.click()
+                    await self.random_delay()
+
+            # Look for and click confirm button if it appears
+            try:
+                confirm_selectors = [
+                    "xpath=//div[@class='a-popover-footer']//span[@data-action='GLUXConfirmAction']/input[@id='GLUXConfirmClose']",
+                    "xpath=//input[@id='GLUXConfirmClose']",
+                    "xpath=//button[contains(@class, 'a-button-primary') and contains(text(), 'Done')]",
+                    "xpath=//button[contains(@class, 'a-button-primary') and contains(text(), 'Continue')]"
+                ]
+
+                for selector in confirm_selectors:
+                    confirm_button = await page.query_selector(selector)
+                    if confirm_button:
+                        is_visible = await confirm_button.is_visible()
+                        if is_visible:
+                            await confirm_button.click()
+                            logger.info("Clicked on confirmation button")
+                            break
+            except Exception as e:
+                logger.info(f"No confirmation button found or couldn't click it: {str(e)}")
+
+            # Wait for location to update
+            await self.random_delay(3.0, 4.0)  # Increased wait time for location to fully update
+
+            # Try fallback methods if location verification failed
+            try:
+                location_text = ""
+                location_elements = [
+                    "xpath=//div[@id='glow-ingress-block']",
+                    "xpath=//span[@id='glow-ingress-line2']"
+                ]
+
+                for selector in location_elements:
+                    element = await page.query_selector(selector)
+                    if element:
+                        text = await element.text_content()
+                        if text:
+                            location_text += text + " "
+
+                location_text = location_text.strip()
+                logger.info(f"Location text after update: {location_text}")
+
+                # Check if postcode is in the location text
+                postcode_normalized = postcode.replace(" ", "").lower()
+                location_normalized = location_text.replace(" ", "").lower()
+
+                if postcode_normalized in location_normalized:
+                    logger.info(f"Successfully set location to postcode: {postcode}")
+                    return True
+                else:
+                    logger.info("Location updated but postcode not visible in text")
+                    return True
+
+            except Exception as e:
+                logger.warning(f"Error verifying location update: {str(e)}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Error setting location by postcode: {str(e)}")
             return False
 
     async def check_for_energy_label(self, product_element) -> Tuple[bool, bool]:
@@ -429,6 +657,7 @@ class EnergyLabelScraper:
             has_formal_label = energy_label is not None
 
             # Check for energy efficiency text (without formal label)
+            # With language=en_GB, all marketplaces should show "Energy Efficiency Class:" in English
             energy_text = await product_element.query_selector(
                 'xpath=.//div[@data-csa-c-type="item"][.//span[contains(normalize-space(.), "Energy Efficiency Class:")]]'
             )
@@ -627,14 +856,19 @@ class EnergyLabelScraper:
                 # Wait for results to load
                 await page.wait_for_load_state("networkidle")
 
+                # Store the current search results URL
+                search_results_url = page.url
+
                 # Find all products on the page
                 product_selector = "xpath=//div[contains(@class, 's-main-slot')]//div[@data-component-type='s-search-result']"
                 product_elements = await page.query_selector_all(product_selector)
 
                 logger.info(f"Found {len(product_elements)} products on page {current_page}")
 
-                # Process each product
-                for product_element in product_elements:
+                # First pass: collect product information without navigation
+                products_to_check = []
+
+                for i, product_element in enumerate(product_elements):
                     try:
                         # Extract ASIN
                         asin = await product_element.get_attribute("data-asin")
@@ -651,7 +885,7 @@ class EnergyLabelScraper:
                             continue
 
                         # Process products WITHOUT formal label (includes those with energy text or no energy info)
-                        logger.info(f"Processing product {asin} - No formal label (has energy text: {has_energy_text})")
+                        logger.info(f"Found product {asin} - No formal label (has energy text: {has_energy_text})")
 
                         # Find product link
                         link_element = await product_element.query_selector('h2 a')
@@ -671,8 +905,27 @@ class EnergyLabelScraper:
                         else:
                             product_url = href
 
+                        # Add language parameter
+                        product_url = self.add_language_param(product_url)
+
+                        products_to_check.append({
+                            'asin': asin,
+                            'url': product_url,
+                            'has_energy_text': has_energy_text
+                        })
+
+                    except Exception as e:
+                        logger.error(f"Error collecting product info: {str(e)}")
+
+                logger.info(f"Collected {len(products_to_check)} products without formal labels on page {current_page}")
+
+                # Second pass: process each product individually
+                for product_data in products_to_check:
+                    try:
+                        logger.info(f"Processing product {product_data['asin']} - navigating to product page")
+
                         # Navigate to product page
-                        await page.goto(product_url, wait_until="domcontentloaded")
+                        await page.goto(product_data['url'], wait_until="domcontentloaded")
 
                         # Wait for product title
                         await page.wait_for_selector("xpath=//span[@id='productTitle']", timeout=10000)
@@ -680,12 +933,12 @@ class EnergyLabelScraper:
 
                         # Extract product information
                         product_info = await self.extract_product_info(
-                            page, asin, has_energy_text, category, domain
+                            page, product_data['asin'], product_data['has_energy_text'], category, domain
                         )
 
                         if product_info:
                             products.append(product_info)
-                            self.processed_products.add(asin)
+                            self.processed_products.add(product_data['asin'])
 
                             # Track brands by host
                             if domain not in self.brands_found:
@@ -695,24 +948,40 @@ class EnergyLabelScraper:
                             logger.info(f"Extracted info for {product_info.brand} - {product_info.product_name[:50]}...")
 
                         # Navigate back to search results
-                        await page.go_back(wait_until="domcontentloaded")
+                        logger.info("Returning to search results...")
+                        await page.goto(search_results_url, wait_until="domcontentloaded")
+
+                        # Wait for search results to reload
+                        try:
+                            await page.wait_for_selector('xpath=//span[@data-component-type="s-search-results"]', timeout=10000)
+                        except:
+                            logger.warning("Search results didn't load properly after returning")
 
                         # Check if we landed on an intermediate page
                         if await self.handle_intermediate_page(page, domain):
-                            # If we handled an intermediate page, we might need to navigate back to search
-                            logger.warning("Intermediate page appeared when going back, may need to re-navigate")
+                            # If we handled an intermediate page, navigate to search results again
+                            await page.goto(search_results_url, wait_until="domcontentloaded")
 
                         await self.random_delay(1.0, 2.0)
 
                     except Exception as e:
-                        logger.error(f"Error processing product: {str(e)}")
+                        logger.error(f"Error processing product {product_data['asin']}: {str(e)}")
                         # Try to return to search results
                         try:
-                            await page.go_back(wait_until="domcontentloaded")
-                            # Check for intermediate page
+                            await page.goto(search_results_url, wait_until="domcontentloaded")
                             await self.handle_intermediate_page(page, domain)
                         except:
                             pass
+
+                # After processing all products on current page, check for next page
+                logger.info(f"Checking for next page after processing {len(products_to_check)} products")
+
+                # Re-check that we're on the search results page
+                current_url = page.url
+                if not any(x in current_url for x in ['/s?', '/s/', 'search']):
+                    logger.info("Not on search results page, navigating back")
+                    await page.goto(search_results_url, wait_until="domcontentloaded")
+                    await page.wait_for_selector('xpath=//span[@data-component-type="s-search-results"]', timeout=10000)
 
                 # Check for next page button with specific selector
                 next_button = await page.query_selector('xpath=//a[contains(@class, "s-pagination-item s-pagination-next")]')
@@ -756,13 +1025,40 @@ class EnergyLabelScraper:
         logger.info(f"Processed {len(products)} products (without formal energy labels) across {current_page} pages")
         return products
 
+    def add_language_param(self, url: str) -> str:
+        """
+        Add language=en_GB parameter to URL to standardize language
+
+        Args:
+            url: Original URL
+
+        Returns:
+            URL with language parameter added
+        """
+        if "language=en_GB" in url:
+            return url  # Already has the parameter
+
+        # Check if URL already has query parameters
+        if "?" in url:
+            # Add as additional parameter
+            return f"{url}&language=en_GB"
+        else:
+            # Add as first parameter
+            return f"{url}?language=en_GB"
+
     async def scrape_country(self, country_key: str) -> List[ProductInfo]:
         """Scrape all categories for a specific country"""
         country_config = COUNTRY_CONFIGS[country_key]
         domain = country_config["domain"]
         locale = country_config["locale"]
+        use_postcode = country_config.get("use_postcode", False)
+        postcode = country_config.get("postcode", "")
 
         logger.info(f"Starting scrape for {country_key} ({domain})")
+        if use_postcode:
+            logger.info(f"Will set location using postcode: {postcode}")
+        else:
+            logger.info(f"Location will be set automatically for {country_key}")
 
         country_products = []
 
@@ -780,17 +1076,26 @@ class EnergyLabelScraper:
             async with camoufox as browser:
                 page = await browser.new_page()
 
-                # Navigate to homepage
+                # Navigate to homepage with English language
                 homepage_url = f"https://www.{domain}"
-                logger.info(f"Navigating to {homepage_url}")
+                homepage_url = self.add_language_param(homepage_url)
+                logger.info(f"Navigating to {homepage_url} (with English language)")
                 await page.goto(homepage_url, wait_until="networkidle")
 
-                # Handle intermediate page if present (Amazon.it and Amazon.es)
+                # Handle intermediate page if present
                 await self.handle_intermediate_page(page, domain)
 
                 # Handle cookie banner
                 await self.handle_cookie_banner(page)
                 await self.random_delay()
+
+                # Set location if postcode is configured
+                if use_postcode and postcode:
+                    logger.info(f"Setting location to postcode: {postcode}")
+                    location_set = await self.set_location_by_postcode(page, postcode)
+                    if not location_set:
+                        logger.warning(f"Could not set location for {country_key}, continuing anyway")
+                    await self.random_delay(1.0, 2.0)
 
                 # Process each category
                 for category_key, category_name in ENERGY_CATEGORIES.items():
@@ -809,7 +1114,8 @@ class EnergyLabelScraper:
                             logger.warning(f"Failed to search for {category_name}")
 
                         # Return to homepage between categories
-                        await page.goto(homepage_url, wait_until="networkidle")
+                        homepage_url_with_lang = self.add_language_param(homepage_url)
+                        await page.goto(homepage_url_with_lang, wait_until="networkidle")
 
                         # Handle intermediate page again if it appears
                         await self.handle_intermediate_page(page, domain)
@@ -820,7 +1126,8 @@ class EnergyLabelScraper:
                         logger.error(f"Error processing category {category_name}: {str(e)}")
                         # Try to recover by going back to homepage
                         try:
-                            await page.goto(homepage_url, wait_until="networkidle")
+                            homepage_url_with_lang = self.add_language_param(homepage_url)
+                            await page.goto(homepage_url_with_lang, wait_until="networkidle")
                         except:
                             pass
 
@@ -833,18 +1140,60 @@ class EnergyLabelScraper:
         """Scrape all configured countries"""
         logger.info(f"Starting energy label scraping for {len(COUNTRY_CONFIGS)} countries")
         logger.info("Will process only products WITHOUT formal energy efficiency labels")
+        logger.info("Using language=en_GB parameter for consistent energy label detection")
 
         for country_key in COUNTRY_CONFIGS:
             try:
                 products = await self.scrape_country(country_key)
                 self.products_data.extend(products)
 
+                # Save country-specific results
+                self.save_country_results(country_key, products)
+
                 logger.info(f"Completed {country_key}: Found {len(products)} products without formal energy labels")
 
             except Exception as e:
                 logger.error(f"Error scraping {country_key}: {str(e)}")
 
-        # Add these two methods to your EnergyLabelScraper class in energy_label_scraper.py
+    def save_results(self):
+        """Save overall results across all countries"""
+        # Save overall detailed results
+        self.save_detailed_results()
+
+        # Save overall brand summary
+        self.save_brand_summary()
+
+        # Create overall summary report
+        self.save_overall_summary()
+
+    def save_detailed_results(self):
+        """Save detailed product information to Excel"""
+        try:
+            import pandas as pd
+
+            # Convert products to dictionaries
+            data = [product.to_dict() for product in self.products_data]
+
+            # Create DataFrame
+            df = pd.DataFrame(data)
+
+            # Add a column to clarify the energy status
+            df['energy_status'] = df['has_energy_text'].apply(
+                lambda x: 'Energy text only' if x else 'No energy info'
+            )
+
+            # Save to Excel in main directory
+            filename = os.path.join(DATA_DIR, "all_products_without_formal_energy_labels.xlsx")
+            df.to_excel(filename, index=False)
+
+            logger.info(f"Saved {len(data)} products (all countries) to {filename}")
+
+        except ImportError:
+            logger.error("pandas not installed, saving as JSON instead")
+            filename = os.path.join(DATA_DIR, "all_products_without_formal_energy_labels.json")
+            data = [product.to_dict() for product in self.products_data]
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
 
     def save_brand_summary(self):
         """Save overall brand summary across all countries"""
@@ -993,46 +1342,6 @@ class EnergyLabelScraper:
                     "country_summary": country_summary,
                     "category_summary": category_data
                 }, f, indent=2, ensure_ascii=False)
-
-    def save_results(self):
-        """Save overall results across all countries"""
-        # Save overall detailed results
-        self.save_detailed_results()
-
-        # Save overall brand summary
-        self.save_brand_summary()
-
-        # Create overall summary report
-        self.save_overall_summary()
-
-    def save_detailed_results(self):
-        """Save detailed product information to Excel"""
-        try:
-            import pandas as pd
-
-            # Convert products to dictionaries
-            data = [product.to_dict() for product in self.products_data]
-
-            # Create DataFrame
-            df = pd.DataFrame(data)
-
-            # Add a column to clarify the energy status
-            df['energy_status'] = df['has_energy_text'].apply(
-                lambda x: 'Energy text only' if x else 'No energy info'
-            )
-
-            # Save to Excel in main directory
-            filename = os.path.join(DATA_DIR, "all_products_without_formal_energy_labels.xlsx")
-            df.to_excel(filename, index=False)
-
-            logger.info(f"Saved {len(data)} products (all countries) to {filename}")
-
-        except ImportError:
-            logger.error("pandas not installed, saving as JSON instead")
-            filename = os.path.join(DATA_DIR, "all_products_without_formal_energy_labels.json")
-            data = [product.to_dict() for product in self.products_data]
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
 
     def save_country_results(self, country_key: str, products: List[ProductInfo]):
         """Save results for a specific country"""
@@ -1183,63 +1492,6 @@ class EnergyLabelScraper:
             filename = os.path.join(country_dir, f"{country_key}_brand_analysis.json")
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(analysis_data, f, indent=2, ensure_ascii=False)
-        """Save brand summary by host"""
-        try:
-            import pandas as pd
-
-            # Create summary data
-            summary_data = []
-            for host, brands in self.brands_found.items():
-                if brands:
-                    summary_data.append({
-                        "amazon_host": f"www.{host}",
-                        "brands": ", ".join(sorted(brands))
-                    })
-
-            # Create DataFrame
-            df = pd.DataFrame(summary_data)
-
-            # Save to Excel
-            filename = os.path.join(DATA_DIR, "brands_without_formal_energy_labels_summary.xlsx")
-            df.to_excel(filename, index=False)
-
-            logger.info(f"Saved brand summary for {len(summary_data)} hosts to {filename}")
-
-            # Also create a detailed brand analysis
-            brand_analysis = []
-            for product in self.products_data:
-                brand_key = f"{product.amazon_host}_{product.brand}"
-                existing = next((b for b in brand_analysis if b['amazon_host'] == product.amazon_host and b['brand'] == product.brand), None)
-
-                if existing:
-                    existing['total_products'] += 1
-                    if product.has_energy_text:
-                        existing['products_with_energy_text'] += 1
-                    else:
-                        existing['products_without_any_energy_info'] += 1
-                else:
-                    brand_analysis.append({
-                        'amazon_host': product.amazon_host,
-                        'brand': product.brand,
-                        'total_products': 1,
-                        'products_with_energy_text': 1 if product.has_energy_text else 0,
-                        'products_without_any_energy_info': 0 if product.has_energy_text else 1
-                    })
-
-            # Save detailed brand analysis
-            if brand_analysis:
-                df_analysis = pd.DataFrame(brand_analysis)
-                df_analysis = df_analysis.sort_values(['amazon_host', 'brand'])
-
-                analysis_filename = os.path.join(DATA_DIR, "brands_without_formal_labels_analysis.xlsx")
-                df_analysis.to_excel(analysis_filename, index=False)
-                logger.info(f"Saved detailed brand analysis to {analysis_filename}")
-
-        except ImportError:
-            logger.error("pandas not installed, saving as JSON instead")
-            filename = os.path.join(DATA_DIR, "brands_without_formal_energy_labels_summary.json")
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(self.brands_found, f, indent=2, ensure_ascii=False)
 
     def print_summary(self):
         """Print summary of results"""
@@ -1291,6 +1543,20 @@ class EnergyLabelScraper:
             text_pct = stats['with_energy_text']/max(1,stats['total'])*100
             print(f"  {category}: {stats['total']} products, {stats['with_energy_text']} with energy text ({text_pct:.1f}%)")
 
+        # Location information
+        print("\n" + "-" * 60)
+        print("Location Settings Used:")
+        for country_key, config in COUNTRY_CONFIGS.items():
+            if config.get("use_postcode", False):
+                print(f"  {country_key}: {config.get('postcode', 'N/A')}")
+            else:
+                print(f"  {country_key}: Automatic location")
+
+        print("\n" + "-" * 60)
+        print("Language Standardization:")
+        print("  All marketplaces use language=en_GB for consistent energy label detection")
+        print("  Energy labels appear as 'Energy Efficiency Class:' in English")
+
         print("\n" + "=" * 60)
         print("FILES SAVED:")
         print("=" * 60)
@@ -1314,58 +1580,6 @@ class EnergyLabelScraper:
         print("NOTE: All products with formal energy labels were skipped during scraping.")
         print("This data includes only products WITHOUT formal energy efficiency labels.")
         print("=" * 60)
-
-    async def handle_cookie_banner(self, page: Page) -> bool:
-        """
-        Handle cookie consent banner
-
-        Cookie decline buttons by country:
-        - Italy: button[@aria-label="Rifiuta"]
-        - Spain, Netherlands, France: button[@id="sp-cc-rejectall-link"]
-        - Others: Various fallback selectors
-        """
-        try:
-            decline_selectors = [
-                # Italy specific - Primary selector
-                "xpath=//button[@aria-label='Rifiuta']",  # Italian "Reject" button
-
-                # Spain, Netherlands, France specific - Primary selector
-                "xpath=//button[@id='sp-cc-rejectall-link']",  # Common for ES, NL, FR
-
-                # Generic and fallback selectors
-                "xpath=//button[@aria-label='Decline']",
-                "xpath=//input[@id='sp-cc-rejectall-link']",
-                "xpath=//a[@id='sp-cc-rejectall-link']",
-                "xpath=//span[@id='sp-cc-rejectall-link']",
-                "xpath=//button[@data-action='sp-cc-reject-all']",
-                "xpath=//button[contains(text(), 'Reject all')]",
-                "xpath=//button[contains(text(), 'Decline')]",
-                "xpath=//button[contains(text(), 'Reject All')]",
-                "xpath=//button[contains(text(), 'Decline All')]",
-
-                # Additional language-specific text selectors as fallback
-                "xpath=//button[contains(text(), 'Rifiuta tutto')]",  # Italian
-                "xpath=//button[contains(text(), 'Tout refuser')]",  # French
-                "xpath=//button[contains(text(), 'Rechazar todo')]",  # Spanish
-                "xpath=//button[contains(text(), 'Alles afwijzen')]",  # Dutch
-                "xpath=//button[contains(text(), 'Avvisa alla')]"  # Swedish
-            ]
-
-            for selector in decline_selectors:
-                decline_button = await page.query_selector(selector)
-                if decline_button:
-                    is_visible = await decline_button.is_visible()
-                    if is_visible:
-                        logger.info(f"Found cookie decline button with selector: {selector}")
-                        await decline_button.click()
-                        await self.random_delay(0.5, 1.0)
-                        return True
-
-            logger.info("No cookie banner found or already handled")
-            return True
-        except Exception as e:
-            logger.error(f"Error handling cookie banner: {str(e)}")
-            return False
 
 
 async def main():
@@ -1411,6 +1625,16 @@ async def main():
     print(f"\nScraper initialized. Results will be saved to:")
     print(f"- Country-specific files in: {DATA_DIR}/{{country}}/")
     print(f"- Overall summary files in: {DATA_DIR}/")
+    print()
+    print("Language standardization: All URLs will use language=en_GB parameter")
+    print("This ensures energy labels appear as 'Energy Efficiency Class:' in English")
+    print()
+    print("Location settings:")
+    for country_key, config in COUNTRY_CONFIGS.items():
+        if config.get("use_postcode", False):
+            print(f"- {country_key}: will use postcode {config.get('postcode', 'N/A')}")
+        else:
+            print(f"- {country_key}: automatic location")
     print()
 
     try:
