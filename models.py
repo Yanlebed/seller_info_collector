@@ -1,5 +1,60 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+
+
+@dataclass
+class ProductInfo:
+    amazon_host: str
+    brand: str
+    product_name: str
+    product_url: str
+    seller_name: str
+    seller_url: str
+    has_energy_text: bool
+    category: str
+    asin: str
+    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    def to_dict(self) -> dict:
+        return {
+            "amazon_host": self.amazon_host,
+            "brand": self.brand,
+            "product_name": self.product_name,
+            "product_url": self.product_url,
+            "seller_name": self.seller_name,
+            "seller_url": self.seller_url,
+            "has_energy_text": self.has_energy_text,
+            "category": self.category,
+            "asin": self.asin,
+            "timestamp": self.timestamp,
+        }
+
+
+@dataclass
+class ProductLink:
+    asin: str
+    url: str
+    has_energy_text: bool
+    category: str
+    category_key: str
+    country: str
+    domain: str
+    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    def to_dict(self) -> dict:
+        return {
+            "asin": self.asin,
+            "url": self.url,
+            "has_energy_text": self.has_energy_text,
+            "category": self.category,
+            "category_key": self.category_key,
+            "country": self.country,
+            "domain": self.domain,
+            "timestamp": self.timestamp,
+        }
+
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Optional, Set
 
 

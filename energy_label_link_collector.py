@@ -25,6 +25,12 @@ from playwright.async_api import Page
 
 from proxy_manager import ProxyManager
 from captcha_solver import CaptchaSolver
+from amazon_utils import add_language_param, navigate_with_handling
+from models import ProductLink
+from amazon_utils import (
+    handle_cookie_banner as util_handle_cookie_banner,
+    handle_intermediate_page as util_handle_intermediate_page,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -42,27 +48,15 @@ DATA_DIR = "energy_label_data"
 LINKS_DIR = os.path.join(DATA_DIR, "product_links")
 os.makedirs(LINKS_DIR, exist_ok=True)
 
-@dataclass
-class ProductLink:
-    """Structure to hold product link information"""
-    asin: str
-    url: str
-    has_energy_text: bool
-    category: str
-    category_key: str
-    country: str
-    domain: str
-    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-    def to_dict(self) -> dict:
-        return asdict(self)
+@dataclass
+class ProductLink(ProductLink):
+    pass
+
 
 # Import configurations from the original module
-from energy_label_scraper import (
-    COUNTRY_CONFIGS,
-    ENERGY_CATEGORIES,
-    CATEGORY_QUERIES
-)
+from amazon_config import COUNTRY_CONFIGS, ENERGY_CATEGORIES, CATEGORY_QUERIES
+
 
 class EnergyLabelLinkCollector:
     """Collector for Amazon product links without formal energy labels"""
@@ -98,14 +92,14 @@ class EnergyLabelLinkCollector:
         """Save collection progress to file"""
         if country_key:
             self.completed_countries.add(country_key)
-        
+
         progress = {
             "completed_countries": list(self.completed_countries),
             "last_updated": datetime.now().isoformat(),
             "total_countries": len(COUNTRY_CONFIGS),
             "remaining_countries": [c for c in COUNTRY_CONFIGS.keys() if c not in self.completed_countries]
         }
-        
+
         try:
             with open(self.progress_file, 'w', encoding='utf-8') as f:
                 json.dump(progress, f, indent=2, ensure_ascii=False)
@@ -118,7 +112,7 @@ class EnergyLabelLinkCollector:
         import glob
         pattern = os.path.join(LINKS_DIR, f"{country_key}_product_links_*.json")
         files = glob.glob(pattern)
-        
+
         if files:
             # Get the most recent file
             latest_file = max(files, key=os.path.getmtime)
@@ -134,7 +128,7 @@ class EnergyLabelLinkCollector:
         # Check progress file
         if country_key in self.completed_countries:
             return True
-        
+
         # Check if recent links file exists
         existing_file = self.get_existing_links_file(country_key)
         if existing_file:
@@ -147,24 +141,24 @@ class EnergyLabelLinkCollector:
                         return True
             except Exception as e:
                 logger.error(f"Error reading existing file {existing_file}: {str(e)}")
-        
+
         return False
 
     def show_status(self):
         """Show current collection status"""
         print("Collection Status")
         print("=" * 50)
-        
+
         progress = self.load_progress()
         completed = set(progress.get('completed_countries', []))
         all_countries = set(COUNTRY_CONFIGS.keys())
         remaining = all_countries - completed
-        
+
         print(f"Total countries: {len(all_countries)}")
         print(f"Completed: {len(completed)}")
         print(f"Remaining: {len(remaining)}")
         print()
-        
+
         if completed:
             print("Completed countries:")
             for country in sorted(completed):
@@ -180,13 +174,13 @@ class EnergyLabelLinkCollector:
                 else:
                     print(f"  ✓ {country}: completed")
             print()
-        
+
         if remaining:
             print("Remaining countries:")
             for country in sorted(remaining):
                 print(f"  ○ {country}")
             print()
-        
+
         last_updated = progress.get('last_updated')
         if last_updated:
             print(f"Last updated: {last_updated}")
@@ -229,130 +223,12 @@ class EnergyLabelLinkCollector:
         return AsyncCamoufox(**camoufox_config)
 
     async def handle_intermediate_page(self, page: Page, domain: str) -> bool:
-        """
-        Handle intermediate pages that appear on some Amazon domains.
-
-        Amazon.it sometimes shows a page with "Clicca qui per tornare alla home page di Amazon.it"
-        Amazon.es sometimes shows a page with "Seguir comprando" button
-        Amazon.fr sometimes shows a page with "Continuer les achats" button
-
-        These pages appear randomly and need to be clicked through to reach the actual site.
-        Sometimes multiple intermediate pages appear in sequence.
-        """
-        handled_any = False
-        max_attempts = 3  # Handle up to 3 intermediate pages in sequence
-
-        for attempt in range(max_attempts):
-            try:
-                # Check for generic intermediate page with ref=cs_503_link
-                generic_button = await page.query_selector('xpath=//a[contains(@href, "ref=cs_503_link")]')
-                if generic_button:
-                    logger.info("Found intermediate page with ref=cs_503_link, clicking to continue")
-                    await generic_button.click()
-                    await page.wait_for_load_state("domcontentloaded")
-                    await self.random_delay(1.0, 2.0)
-                    handled_any = True
-                    continue  # Check for more intermediate pages
-
-                # Check for primary button intermediate page
-                primary_button = await page.query_selector('xpath=//span[@class="a-button a-button-primary a-span12"]')
-                if primary_button:
-                    logger.info("Found intermediate page with primary button, clicking to continue")
-                    await primary_button.click()
-                    await page.wait_for_load_state("domcontentloaded")
-                    await self.random_delay(1.0, 2.0)
-                    handled_any = True
-                    continue  # Check for more intermediate pages
-
-                # Check for parent element of primary button (sometimes need to click the parent)
-                primary_button_parent = await page.query_selector(
-                    'xpath=//span[@class="a-button a-button-primary a-span12"]/span/input')
-                if primary_button_parent:
-                    logger.info("Found intermediate page with primary button input, clicking to continue")
-                    await primary_button_parent.click()
-                    await page.wait_for_load_state("domcontentloaded")
-                    await self.random_delay(1.0, 2.0)
-                    handled_any = True
-                    continue
-
-                # Amazon.it intermediate page
-                if domain == "amazon.it":
-                    # Check for the "Click here to return to Amazon.it homepage" link
-                    it_button = await page.query_selector(
-                        'xpath=//a[contains(text(), "Clicca qui per tornare alla home page di Amazon.it")]'
-                    )
-                    alternative_it_button = await page.query_selector(
-                        'xpath=//button[@alt="Continua con gli acquisti"]'
-                    )
-                    final_it_button = it_button or alternative_it_button
-                    if final_it_button:
-                        logger.info("Found Amazon.it intermediate page, clicking to go to homepage")
-                        await final_it_button.click()
-                        await page.wait_for_load_state("domcontentloaded")
-                        await self.random_delay(1.0, 2.0)
-                        handled_any = True
-                        continue
-
-                # Amazon.es intermediate page
-                elif domain == "amazon.es":
-                    # Check for the "Continue shopping" button
-                    es_button = await page.query_selector('xpath=//button[@alt="Seguir comprando"]')
-                    if es_button:
-                        logger.info("Found Amazon.es intermediate page, clicking to continue")
-                        await es_button.click()
-                        await page.wait_for_load_state("domcontentloaded")
-                        await self.random_delay(1.0, 2.0)
-                        handled_any = True
-                        continue
-
-                # Amazon.fr intermediate page
-                elif domain == "amazon.fr":
-                    # Check for the "Continue shopping" button in French
-                    fr_button = await page.query_selector('xpath=//button[@alt="Continuer les achats"]')
-                    if fr_button:
-                        logger.info("Found Amazon.fr intermediate page, clicking to continue")
-                        await fr_button.click()
-                        await page.wait_for_load_state("domcontentloaded")
-                        await self.random_delay(1.0, 2.0)
-                        handled_any = True
-                        continue
-
-                # No more intermediate pages found
-                break
-
-            except Exception as e:
-                logger.error(f"Error handling intermediate page on attempt {attempt + 1}: {str(e)}")
-                break
-
-        return handled_any
+        """Delegate to shared intermediate-page handler."""
+        return await util_handle_intermediate_page(page, domain)
 
     async def handle_cookie_banner(self, page: Page) -> bool:
-        """Handle cookie consent banner"""
-        try:
-            decline_selectors = [
-                "xpath=//button[@aria-label='Rifiuta']",  # Italian
-                "xpath=//button[@id='sp-cc-rejectall-link']",  # Common
-                "xpath=//button[@aria-label='Decline']",
-                "xpath=//input[@id='sp-cc-rejectall-link']",
-                "xpath=//a[@id='sp-cc-rejectall-link']",
-                "xpath=//button[contains(text(), 'Reject all')]",
-                "xpath=//button[contains(text(), 'Decline')]",
-            ]
-
-            for selector in decline_selectors:
-                decline_button = await page.query_selector(selector)
-                if decline_button:
-                    is_visible = await decline_button.is_visible()
-                    if is_visible:
-                        logger.info(f"Found cookie decline button")
-                        await decline_button.click()
-                        await self.random_delay(0.5, 1.0)
-                        return True
-
-            return True
-        except Exception as e:
-            logger.error(f"Error handling cookie banner: {str(e)}")
-            return False
+        """Delegate to shared cookie banner handler."""
+        return await util_handle_cookie_banner(page)
 
     async def set_location_by_postcode(self, page: Page, postcode: str, category_url: Optional[str] = None) -> bool:
         """Set the delivery location using a postcode"""
@@ -492,14 +368,8 @@ class EnergyLabelLinkCollector:
             return False
 
     def add_language_param(self, url: str) -> str:
-        """Add language=en_GB parameter to URL"""
-        if "language=en_GB" in url:
-            return url
-
-        if "?" in url:
-            return f"{url}&language=en_GB"
-        else:
-            return f"{url}?language=en_GB"
+        """Delegate to shared URL language parameter helper."""
+        return add_language_param(url)
 
     async def check_for_energy_label(self, product_element) -> Tuple[bool, bool]:
         """Check if a product has an energy efficiency label or just energy text"""
@@ -543,20 +413,20 @@ class EnergyLabelLinkCollector:
                 "xpath=//input[contains(@class, 'nav-input')]",
                 "xpath=//input[contains(@aria-label, 'Search')]"
             ]
-            
+
             search_box = None
             for selector in search_box_selectors:
                 search_box = await page.query_selector(selector)
                 if search_box:
                     logger.debug(f"Found search box with selector: {selector}")
                     break
-            
+
             if not search_box:
                 logger.error("Could not find search box with any selector")
                 # Take screenshot for debugging
                 try:
                     import time
-                    screenshot_path = f"debug_search_box_{country_key}_{int(time.time())}.png"
+                    screenshot_path = f"debug_search_box_{domain}_{int(time.time())}.png"
                     await page.screenshot(path=screenshot_path)
                     logger.info(f"Debug screenshot saved: {screenshot_path}")
                 except:
@@ -588,7 +458,7 @@ class EnergyLabelLinkCollector:
             return False
 
     async def collect_product_links(self, page: Page, category_key: str, category_name: str,
-                                  country_key: str, domain: str) -> List[ProductLink]:
+                                    country_key: str, domain: str) -> List[ProductLink]:
         """Collect product links from search results"""
         links = []
         current_page = 1
@@ -676,16 +546,19 @@ class EnergyLabelLinkCollector:
                     except Exception as e:
                         logger.error(f"Error processing product element: {str(e)}")
 
-                logger.info(f"Collected {products_without_formal_label} products without formal labels on page {current_page}")
+                logger.info(
+                    f"Collected {products_without_formal_label} products without formal labels on page {current_page}")
 
                 # Check for next page
-                next_button = await page.query_selector('xpath=//a[contains(@class, "s-pagination-item s-pagination-next")]')
+                next_button = await page.query_selector(
+                    'xpath=//a[contains(@class, "s-pagination-item s-pagination-next")]')
 
                 if next_button:
                     is_disabled = await next_button.get_attribute("aria-disabled")
                     classes = await next_button.get_attribute("class")
 
-                    if (not is_disabled or is_disabled.lower() != "true") and "s-pagination-disabled" not in (classes or ""):
+                    if (not is_disabled or is_disabled.lower() != "true") and "s-pagination-disabled" not in (
+                            classes or ""):
                         logger.info(f"Going to page {current_page + 1}")
 
                         try:
@@ -741,15 +614,9 @@ class EnergyLabelLinkCollector:
                 page = await browser.new_page()
 
                 # Navigate to homepage with English language
-                homepage_url = f"https://www.{domain}"
-                homepage_url = self.add_language_param(homepage_url)
+                homepage_url = add_language_param(f"https://www.{domain}")
                 logger.info(f"Navigating to {homepage_url}")
-                await page.goto(homepage_url, wait_until="domcontentloaded")
-
-                # Handle initial setup
-                await self.handle_intermediate_page(page, domain)
-                await self.handle_cookie_banner(page)
-                await self.random_delay()
+                await navigate_with_handling(page, homepage_url, domain, wait_until="domcontentloaded")
 
                 # Set location if needed
                 if use_postcode and postcode:
@@ -776,10 +643,9 @@ class EnergyLabelLinkCollector:
                             logger.warning(f"Failed to search for {category_name}")
 
                         # Return to homepage between categories
-                        homepage_url_with_lang = self.add_language_param(homepage_url)
-                        await page.goto(homepage_url_with_lang, wait_until="domcontentloaded")
-                        await self.handle_intermediate_page(page, domain)
-                        await self.random_delay(2.0, 4.0)
+                        homepage_url_with_lang = add_language_param(homepage_url)
+                        await navigate_with_handling(page, homepage_url_with_lang, domain,
+                                                     wait_until="domcontentloaded", post_delay=(2.0, 4.0))
 
                     except Exception as e:
                         logger.error(f"Error processing category {category_name}: {str(e)}")
@@ -845,7 +711,7 @@ class EnergyLabelLinkCollector:
         # Load existing progress
         if resume:
             self.load_progress()
-        
+
         target_countries = countries or list(COUNTRY_CONFIGS.keys())
         logger.info(f"Starting link collection for {len(target_countries)} countries")
 
@@ -860,7 +726,7 @@ class EnergyLabelLinkCollector:
             return
 
         failed_countries = []
-        
+
         for i, country_key in enumerate(target_countries):
             if country_key not in COUNTRY_CONFIGS:
                 logger.warning(f"Unknown country: {country_key}")
@@ -871,11 +737,11 @@ class EnergyLabelLinkCollector:
                 logger.info(f"Skipping {country_key} - already completed")
                 continue
 
-            logger.info(f"Processing country {i+1}/{len(target_countries)}: {country_key}")
-            
+            logger.info(f"Processing country {i + 1}/{len(target_countries)}: {country_key}")
+
             # Try to collect links with retries
             success = await self.collect_country_with_retry(country_key, max_retries=2)
-            
+
             if success:
                 # Mark as completed
                 self.save_progress(country_key)
@@ -922,7 +788,7 @@ class EnergyLabelLinkCollector:
                 logger.error(f"Error processing {country_key} (attempt {attempt + 1}): {str(e)}")
                 if attempt == max_retries:
                     return False
-                    
+
         return False
 
     def print_summary(self):
@@ -942,8 +808,8 @@ class EnergyLabelLinkCollector:
 
                 print(f"\n{country.upper()}:")
                 print(f"  Total: {len(links)}")
-                print(f"  With energy text: {with_text} ({with_text/len(links)*100:.1f}%)")
-                print(f"  Without energy info: {without_info} ({without_info/len(links)*100:.1f}%)")
+                print(f"  With energy text: {with_text} ({with_text / len(links) * 100:.1f}%)")
+                print(f"  Without energy info: {without_info} ({without_info / len(links) * 100:.1f}%)")
 
                 # Category breakdown
                 by_category = {}
@@ -967,17 +833,17 @@ async def main():
 
     parser = argparse.ArgumentParser(description='Energy Label Link Collector - Module 1')
     parser.add_argument('--countries', type=str,
-                       help='Comma-separated country codes (e.g., italy,france)')
+                        help='Comma-separated country codes (e.g., italy,france)')
     parser.add_argument('--no-headless', action='store_true',
-                       help='Show browser window')
+                        help='Show browser window')
     parser.add_argument('--proxy', type=str,
-                       help='Single proxy to use')
+                        help='Single proxy to use')
     parser.add_argument('--no-resume', action='store_true',
-                       help='Start fresh without loading previous progress')
+                        help='Start fresh without loading previous progress')
     parser.add_argument('--status', action='store_true',
-                       help='Show collection status and exit')
+                        help='Show collection status and exit')
     parser.add_argument('--reset', action='store_true',
-                       help='Reset progress and start over')
+                        help='Reset progress and start over')
     args = parser.parse_args()
 
     # Parse countries
@@ -999,7 +865,8 @@ async def main():
 
     # Set up CAPTCHA solver
     captcha_solver = None
-    captcha_api_key = os.getenv("CAPTCHA_API_KEY", "CAP-956BF088AFEBDE1D55D75C975171507466CFFDF3C9657C7412145974FF602B9A")
+    captcha_api_key = os.getenv("CAPTCHA_API_KEY",
+                                "CAP-956BF088AFEBDE1D55D75C975171507466CFFDF3C9657C7412145974FF602B9A")
     if captcha_api_key:
         captcha_solver = CaptchaSolver(captcha_api_key)
 

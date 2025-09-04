@@ -27,6 +27,11 @@ from playwright.async_api import Page
 
 from proxy_manager import ProxyManager
 from captcha_solver import CaptchaSolver
+from amazon_utils import (
+    handle_cookie_banner as util_handle_cookie_banner,
+    handle_intermediate_page as util_handle_intermediate_page,
+    navigate_with_handling,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -45,8 +50,9 @@ LINKS_DIR = os.path.join(DATA_DIR, "product_links")
 RESULTS_DIR = os.path.join(DATA_DIR, "extracted_data")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Import ProductInfo and configurations from the original module
-from energy_label_scraper import ProductInfo, COUNTRY_CONFIGS
+# Import shared models and configurations
+from models import ProductInfo
+from amazon_config import COUNTRY_CONFIGS
 
 class EnergyLabelDataExtractor:
     """Extractor for detailed product information from collected links"""
@@ -94,85 +100,8 @@ class EnergyLabelDataExtractor:
         return AsyncCamoufox(**camoufox_config)
 
     async def handle_intermediate_page(self, page: Page, domain: str) -> bool:
-        """Handle intermediate pages that appear on some Amazon domains"""
-        handled_any = False
-        max_attempts = 3  # Handle up to 3 intermediate pages in sequence
-
-        for attempt in range(max_attempts):
-            try:
-                # Check for generic intermediate page with ref=cs_503_link
-                generic_button = await page.query_selector('xpath=//a[contains(@href, "ref=cs_503_link")]')
-                if generic_button:
-                    logger.info("Found intermediate page with ref=cs_503_link, clicking to continue")
-                    await generic_button.click()
-                    await page.wait_for_load_state("domcontentloaded")
-                    await self.random_delay(1.0, 2.0)
-                    handled_any = True
-                    continue  # Check for more intermediate pages
-
-                # Check for primary button intermediate page
-                primary_button = await page.query_selector('xpath=//span[@class="a-button a-button-primary a-span12"]')
-                if primary_button:
-                    logger.info("Found intermediate page with primary button, clicking to continue")
-                    await primary_button.click()
-                    await page.wait_for_load_state("domcontentloaded")
-                    await self.random_delay(1.0, 2.0)
-                    handled_any = True
-                    continue  # Check for more intermediate pages
-
-                # Check for parent element of primary button (sometimes need to click the parent)
-                primary_button_parent = await page.query_selector('xpath=//span[@class="a-button a-button-primary a-span12"]/span/input')
-                if primary_button_parent:
-                    logger.info("Found intermediate page with primary button input, clicking to continue")
-                    await primary_button_parent.click()
-                    await page.wait_for_load_state("domcontentloaded")
-                    await self.random_delay(1.0, 2.0)
-                    handled_any = True
-                    continue
-
-                # Amazon.it intermediate page
-                if domain == "amazon.it":
-                    it_button = await page.query_selector(
-                        'xpath=//a[contains(text(), "Clicca qui per tornare alla home page di Amazon.it")]'
-                    )
-                    if it_button:
-                        logger.info("Found Amazon.it intermediate page, clicking to continue")
-                        await it_button.click()
-                        await page.wait_for_load_state("domcontentloaded")
-                        await self.random_delay(1.0, 2.0)
-                        handled_any = True
-                        continue
-
-                # Amazon.es intermediate page
-                elif domain == "amazon.es":
-                    es_button = await page.query_selector('xpath=//button[@alt="Seguir comprando"]')
-                    if es_button:
-                        logger.info("Found Amazon.es intermediate page, clicking to continue")
-                        await es_button.click()
-                        await page.wait_for_load_state("domcontentloaded")
-                        await self.random_delay(1.0, 2.0)
-                        handled_any = True
-                        continue
-
-                # Amazon.fr intermediate page
-                elif domain == "amazon.fr":
-                    fr_button = await page.query_selector('xpath=//button[@alt="Continuer les achats"]')
-                    if fr_button:
-                        logger.info("Found Amazon.fr intermediate page, clicking to continue")
-                        await fr_button.click()
-                        await page.wait_for_load_state("domcontentloaded")
-                        await self.random_delay(1.0, 2.0)
-                        handled_any = True
-                        continue
-
-                # No more intermediate pages found
-                break
-
-            except Exception as e:
-                logger.error(f"Error handling intermediate page on attempt {attempt + 1}: {str(e)}")
-                break
-
-        return handled_any
+        """Delegate to shared intermediate-page handler."""
+        return await util_handle_intermediate_page(page, domain)
 
     def load_links_from_file(self, filepath: str) -> List[dict]:
         """Load product links from a JSON file"""
@@ -375,13 +304,14 @@ class EnergyLabelDataExtractor:
                     logger.info(f"Processing product {i+1}/{len(links)}: {asin}")
 
                     try:
-                        # Navigate to product page
-                        await page.goto(link_data['url'], wait_until="domcontentloaded", timeout=30000)
-
-                        # Handle intermediate page if it appears
-                        if await self.handle_intermediate_page(page, domain):
-                            logger.info("Handled intermediate page, navigating to product again")
-                            await page.goto(link_data['url'], wait_until="domcontentloaded", timeout=30000)
+                        # Navigate to product page with intermediate/cookie handling
+                        await navigate_with_handling(
+                            page,
+                            link_data['url'],
+                            domain,
+                            wait_until="domcontentloaded",
+                            timeout_ms=30000,
+                        )
 
                         # Wait for product title
                         await page.wait_for_selector("xpath=//span[@id='productTitle']", timeout=10000)

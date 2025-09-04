@@ -239,8 +239,7 @@ class AmazonSellerScraper:
             logger.error(f"Error saving cookies: {str(e)}")
             return False
 
-    async def load_cookies(self, browser, country_code: str, proxy: Optional[str] = None) -> Tuple[
-        bool, Optional[str], Optional[List]]:
+    async def load_cookies(self, browser, country_code: str, proxy: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[List]]:
         """
         Load cookies from file into browser context
 
@@ -1816,9 +1815,7 @@ class AmazonSellerScraper:
             logger.error(f"Error navigating to next page: {str(e)}")
             return False
 
-    async def process_category_page_for_sellers(self, page: Page, max_sellers: int, country_code: str,
-                                                category_name: str, domain: str, max_pages: int = 3) -> List[
-        SellerInfo]:
+    async def process_category_page_for_sellers(self, page: Page, max_sellers: int, country_code: str, category_name: str, domain: str, max_pages: int = 3) -> List[SellerInfo]:
         """
         Process category pages to find seller links directly from offer listings using a single page.
         This version processes all offer listings before returning to the category page.
@@ -2352,8 +2349,7 @@ class AmazonSellerScraper:
             logger.error(f"Error processing category page for sellers: {str(e)}")
             return sellers_found
 
-    async def process_products_by_page(self, page: Page, max_products: int, country_code: str, category_name: str,
-                                       domain: str, max_pages: int = 3) -> List[SellerInfo]:
+    async def process_products_by_page(self, page: Page, max_products: int, country_code: str, category_name: str, domain: str, max_pages: int = 3) -> List[SellerInfo]:
         """
         Process products page by page, extracting seller information as we go
         """
