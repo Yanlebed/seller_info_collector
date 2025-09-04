@@ -807,10 +807,25 @@ class EnergyLabelScraper:
                 logger.warning(f"No search query found for {category_key} on {domain}")
                 return False
 
-            # Find search box
-            search_box = await page.query_selector("xpath=//input[@id='twotabsearchtextbox']")
+            # Find search box - try multiple selectors
+            search_box_selectors = [
+                "xpath=//input[@id='twotabsearchtextbox']",
+                "xpath=//input[@id='nav-bb-search']",
+                "xpath=//input[@name='field-keywords']",
+                "xpath=//input[@placeholder='Search Amazon']",
+                "xpath=//input[contains(@class, 'nav-input')]",
+                "xpath=//input[contains(@aria-label, 'Search')]"
+            ]
+            
+            search_box = None
+            for selector in search_box_selectors:
+                search_box = await page.query_selector(selector)
+                if search_box:
+                    logger.debug(f"Found search box with selector: {selector}")
+                    break
+            
             if not search_box:
-                logger.error("Could not find search box")
+                logger.error("Could not find search box with any selector")
                 return False
 
             # Click and clear search box

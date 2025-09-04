@@ -78,6 +78,129 @@ class EnergyLabelLinkCollector:
         self.headless = headless
         self.collected_links: Dict[str, List[ProductLink]] = {}  # country -> links
         self.processed_asins: Set[str] = set()
+        self.progress_file = os.path.join(LINKS_DIR, "collection_progress.json")
+        self.completed_countries: Set[str] = set()
+
+    def load_progress(self) -> Dict[str, any]:
+        """Load collection progress from file"""
+        if os.path.exists(self.progress_file):
+            try:
+                with open(self.progress_file, 'r', encoding='utf-8') as f:
+                    progress = json.load(f)
+                    self.completed_countries = set(progress.get('completed_countries', []))
+                    logger.info(f"Loaded progress: {len(self.completed_countries)} countries completed")
+                    return progress
+            except Exception as e:
+                logger.error(f"Error loading progress: {str(e)}")
+        return {"completed_countries": [], "last_updated": None}
+
+    def save_progress(self, country_key: str = None):
+        """Save collection progress to file"""
+        if country_key:
+            self.completed_countries.add(country_key)
+        
+        progress = {
+            "completed_countries": list(self.completed_countries),
+            "last_updated": datetime.now().isoformat(),
+            "total_countries": len(COUNTRY_CONFIGS),
+            "remaining_countries": [c for c in COUNTRY_CONFIGS.keys() if c not in self.completed_countries]
+        }
+        
+        try:
+            with open(self.progress_file, 'w', encoding='utf-8') as f:
+                json.dump(progress, f, indent=2, ensure_ascii=False)
+            logger.debug(f"Progress saved: {len(self.completed_countries)}/{len(COUNTRY_CONFIGS)} countries completed")
+        except Exception as e:
+            logger.error(f"Error saving progress: {str(e)}")
+
+    def get_existing_links_file(self, country_key: str) -> Optional[str]:
+        """Check if a recent links file already exists for a country"""
+        import glob
+        pattern = os.path.join(LINKS_DIR, f"{country_key}_product_links_*.json")
+        files = glob.glob(pattern)
+        
+        if files:
+            # Get the most recent file
+            latest_file = max(files, key=os.path.getmtime)
+            # Check if file is from today (within last 24 hours)
+            file_time = os.path.getmtime(latest_file)
+            current_time = datetime.now().timestamp()
+            if current_time - file_time < 86400:  # 24 hours
+                return latest_file
+        return None
+
+    def is_country_completed(self, country_key: str) -> bool:
+        """Check if a country has been completed recently"""
+        # Check progress file
+        if country_key in self.completed_countries:
+            return True
+        
+        # Check if recent links file exists
+        existing_file = self.get_existing_links_file(country_key)
+        if existing_file:
+            try:
+                with open(existing_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if data.get('total_links', 0) > 0:
+                        logger.info(f"Found existing links file for {country_key}: {existing_file}")
+                        self.completed_countries.add(country_key)
+                        return True
+            except Exception as e:
+                logger.error(f"Error reading existing file {existing_file}: {str(e)}")
+        
+        return False
+
+    def show_status(self):
+        """Show current collection status"""
+        print("Collection Status")
+        print("=" * 50)
+        
+        progress = self.load_progress()
+        completed = set(progress.get('completed_countries', []))
+        all_countries = set(COUNTRY_CONFIGS.keys())
+        remaining = all_countries - completed
+        
+        print(f"Total countries: {len(all_countries)}")
+        print(f"Completed: {len(completed)}")
+        print(f"Remaining: {len(remaining)}")
+        print()
+        
+        if completed:
+            print("Completed countries:")
+            for country in sorted(completed):
+                existing_file = self.get_existing_links_file(country)
+                if existing_file:
+                    try:
+                        with open(existing_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            links_count = data.get('total_links', 0)
+                            print(f"  ✓ {country}: {links_count} links")
+                    except:
+                        print(f"  ✓ {country}: file error")
+                else:
+                    print(f"  ✓ {country}: completed")
+            print()
+        
+        if remaining:
+            print("Remaining countries:")
+            for country in sorted(remaining):
+                print(f"  ○ {country}")
+            print()
+        
+        last_updated = progress.get('last_updated')
+        if last_updated:
+            print(f"Last updated: {last_updated}")
+        print()
+
+    def reset_progress(self):
+        """Reset collection progress"""
+        try:
+            if os.path.exists(self.progress_file):
+                os.remove(self.progress_file)
+            self.completed_countries.clear()
+            print("Progress has been reset successfully.")
+        except Exception as e:
+            print(f"Error resetting progress: {str(e)}")
 
     async def random_delay(self, min_factor=1.0, max_factor=1.0):
         """Add a random delay to simulate human behavior"""
@@ -411,10 +534,33 @@ class EnergyLabelLinkCollector:
                 logger.warning(f"No search query found for {category_key} on {domain}")
                 return False
 
-            # Find and use search box
-            search_box = await page.query_selector("xpath=//input[@id='twotabsearchtextbox']")
+            # Find and use search box - try multiple selectors
+            search_box_selectors = [
+                "xpath=//input[@id='twotabsearchtextbox']",
+                "xpath=//input[@id='nav-bb-search']",
+                "xpath=//input[@name='field-keywords']",
+                "xpath=//input[@placeholder='Search Amazon']",
+                "xpath=//input[contains(@class, 'nav-input')]",
+                "xpath=//input[contains(@aria-label, 'Search')]"
+            ]
+            
+            search_box = None
+            for selector in search_box_selectors:
+                search_box = await page.query_selector(selector)
+                if search_box:
+                    logger.debug(f"Found search box with selector: {selector}")
+                    break
+            
             if not search_box:
-                logger.error("Could not find search box")
+                logger.error("Could not find search box with any selector")
+                # Take screenshot for debugging
+                try:
+                    import time
+                    screenshot_path = f"debug_search_box_{country_key}_{int(time.time())}.png"
+                    await page.screenshot(path=screenshot_path)
+                    logger.info(f"Debug screenshot saved: {screenshot_path}")
+                except:
+                    pass
                 return False
 
             await search_box.click()
@@ -694,18 +840,69 @@ class EnergyLabelLinkCollector:
         for cat, count in summary["by_category"].items():
             print(f"    - {cat}: {count}")
 
-    async def collect_all_countries(self, countries: Optional[List[str]] = None):
-        """Collect links for all or specified countries"""
+    async def collect_all_countries(self, countries: Optional[List[str]] = None, resume: bool = True):
+        """Collect links for all or specified countries with resume capability"""
+        # Load existing progress
+        if resume:
+            self.load_progress()
+        
         target_countries = countries or list(COUNTRY_CONFIGS.keys())
-
         logger.info(f"Starting link collection for {len(target_countries)} countries")
 
-        for country_key in target_countries:
+        if resume and self.completed_countries:
+            remaining = [c for c in target_countries if c not in self.completed_countries]
+            logger.info(f"Resume mode: {len(self.completed_countries)} countries already completed")
+            logger.info(f"Remaining countries: {remaining}")
+            target_countries = remaining
+
+        if not target_countries:
+            logger.info("All countries already completed!")
+            return
+
+        failed_countries = []
+        
+        for i, country_key in enumerate(target_countries):
             if country_key not in COUNTRY_CONFIGS:
                 logger.warning(f"Unknown country: {country_key}")
                 continue
 
+            # Skip if already completed (double-check)
+            if resume and self.is_country_completed(country_key):
+                logger.info(f"Skipping {country_key} - already completed")
+                continue
+
+            logger.info(f"Processing country {i+1}/{len(target_countries)}: {country_key}")
+            
+            # Try to collect links with retries
+            success = await self.collect_country_with_retry(country_key, max_retries=2)
+            
+            if success:
+                # Mark as completed
+                self.save_progress(country_key)
+                logger.info(f"✓ Completed {country_key}")
+            else:
+                failed_countries.append(country_key)
+                logger.error(f"✗ Failed {country_key} after all retries")
+
+            # Delay between countries
+            if country_key != target_countries[-1]:
+                await asyncio.sleep(5.0)
+
+        # Summary
+        if failed_countries:
+            logger.warning(f"Failed countries: {failed_countries}")
+            logger.info("You can rerun the script to retry failed countries")
+        else:
+            logger.info("All countries completed successfully!")
+
+    async def collect_country_with_retry(self, country_key: str, max_retries: int = 2) -> bool:
+        """Collect links for a country with retry logic"""
+        for attempt in range(max_retries + 1):
             try:
+                if attempt > 0:
+                    logger.info(f"Retry attempt {attempt} for {country_key}")
+                    await asyncio.sleep(10.0)  # Wait before retry
+
                 # Collect links for this country
                 links = await self.collect_country_links(country_key)
 
@@ -715,14 +912,18 @@ class EnergyLabelLinkCollector:
                 # Save to file
                 self.save_links(country_key, links)
 
-                logger.info(f"Completed {country_key}: Collected {len(links)} links")
+                logger.info(f"Collected {len(links)} links for {country_key}")
+                return True
 
-                # Delay between countries
-                if country_key != target_countries[-1]:
-                    await asyncio.sleep(5.0)
-
+            except KeyboardInterrupt:
+                logger.info("Collection interrupted by user")
+                raise
             except Exception as e:
-                logger.error(f"Error processing {country_key}: {str(e)}")
+                logger.error(f"Error processing {country_key} (attempt {attempt + 1}): {str(e)}")
+                if attempt == max_retries:
+                    return False
+                    
+        return False
 
     def print_summary(self):
         """Print summary of collected links"""
@@ -771,6 +972,12 @@ async def main():
                        help='Show browser window')
     parser.add_argument('--proxy', type=str,
                        help='Single proxy to use')
+    parser.add_argument('--no-resume', action='store_true',
+                       help='Start fresh without loading previous progress')
+    parser.add_argument('--status', action='store_true',
+                       help='Show collection status and exit')
+    parser.add_argument('--reset', action='store_true',
+                       help='Reset progress and start over')
     args = parser.parse_args()
 
     # Parse countries
@@ -803,6 +1010,17 @@ async def main():
         headless=not args.no_headless
     )
 
+    # Handle status check
+    if args.status:
+        collector.show_status()
+        return
+
+    # Handle reset
+    if args.reset:
+        collector.reset_progress()
+        print("Progress has been reset. You can now start collection fresh.")
+        return
+
     print("Energy Label Link Collector - Module 1")
     print("=" * 60)
     print("This module will:")
@@ -815,15 +1033,29 @@ async def main():
     print(f"Links will be saved to: {LINKS_DIR}")
     print()
 
+    # Show resume info
+    resume_mode = not args.no_resume
+    if resume_mode:
+        progress = collector.load_progress()
+        completed = progress.get('completed_countries', [])
+        if completed:
+            print(f"Resume mode: {len(completed)} countries already completed")
+            remaining = [c for c in COUNTRY_CONFIGS.keys() if c not in completed]
+            print(f"Remaining: {remaining}")
+            print("Use --no-resume to start fresh or --reset to clear progress")
+    print()
+
     try:
         # Collect links
-        await collector.collect_all_countries(countries)
+        await collector.collect_all_countries(countries, resume=resume_mode)
 
         # Print summary
         collector.print_summary()
 
     except KeyboardInterrupt:
         logger.info("Collection interrupted by user")
+        print("\nCollection was interrupted. Progress has been saved.")
+        print("You can resume by running the script again (resume is enabled by default).")
         collector.print_summary()
     except Exception as e:
         logger.error(f"Unhandled exception: {str(e)}")
