@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate personalized messages for brands missing energy labels
-and take screenshots for brands with 4 or more products
+and take screenshots for all affected products per brand.
 """
 
 import json
@@ -278,7 +278,7 @@ class MessageGenerator:
             return None
 
     async def take_screenshots_for_brand(self, brand_data: Dict, products_df: pd.DataFrame) -> List[str]:
-        """Take screenshots for a brand's products (max 3)"""
+        """Take screenshots for a brand's products"""
         brand_name = brand_data['brand']
         amazon_host = brand_data['amazon_host']
         
@@ -295,11 +295,11 @@ class MessageGenerator:
             logger.warning(f"No products without energy labels found for brand: {brand_name}")
             return []
         
-        # Take max 4 screenshots
+        # Take screenshots for all products, skipping those already captured
         screenshots = []
-        products_to_screenshot = brand_products.head(4)
+        products_to_screenshot = brand_products
         
-        logger.info(f"Will take screenshots for {len(products_to_screenshot)} products")
+        logger.info(f"Will consider {len(products_to_screenshot)} products for screenshots")
         
         # Setup browser for this amazon host
         try:
@@ -312,6 +312,17 @@ class MessageGenerator:
                 
                 for idx, (_, product) in enumerate(products_to_screenshot.iterrows()):
                     logger.info(f"Processing product {idx + 1}/{len(products_to_screenshot)}")
+
+                    # Skip if screenshot already exists for this ASIN
+                    asin = extract_asin_from_url(str(product['product_url']))
+                    if asin:
+                        country = amazon_host.replace("www.amazon.", "")
+                        brand_dirname = self.sanitize_dirname(brand_name)
+                        expected_path = SCREENSHOTS_DIR / country / brand_dirname / f"product_{asin}.png"
+                        if expected_path.exists():
+                            screenshots.append(str(expected_path))
+                            logger.info(f"Skipping existing screenshot: {expected_path}")
+                            continue
                     screenshot_path = await self.take_product_screenshot(
                         page, 
                         str(product['product_url']), 
@@ -439,19 +450,16 @@ class MessageGenerator:
             else:
                 category = "appliances"
             
-            # Determine if we need screenshots (4 or more products)
-            need_screenshots = total_products >= 4
-            
-            if need_screenshots:
-                logger.info(f"Taking screenshots for {brand_name} ({total_products} products)")
-                screenshots = await self.take_screenshots_for_brand(brand_data.to_dict(), products_df)
-                self.screenshots_taken[brand_key] = screenshots
+            # Always gather screenshots now (all affected products)
+            logger.info(f"Taking screenshots for {brand_name} ({total_products} products)")
+            screenshots = await self.take_screenshots_for_brand(brand_data.to_dict(), products_df)
+            self.screenshots_taken[brand_key] = screenshots
             
             # Generate message
             message = self.generate_message(
                 brand_data.to_dict(), 
                 category, 
-                include_screenshot=need_screenshots
+                include_screenshot=True
             )
             
             messages.append(message)
