@@ -2,6 +2,13 @@ from dataclasses import dataclass
 
 # Country and category configurations with postcodes
 COUNTRY_CONFIGS = {
+    "germany": {
+        "domain": "amazon.de",
+        "country_code": "DE",
+        "locale": "de-DE",
+        "use_postcode": True,
+        "postcode": "10115",
+    },
     "sweden": {
         "domain": "amazon.se",
         "country_code": "SE",
@@ -156,6 +163,20 @@ CATEGORY_QUERIES = {
         "amazon.es": "neumáticos",
         "amazon.nl": "banden",
     },
+}
+
+
+# Optional: direct seed category URLs per country (will be used if present)
+CATEGORY_SEED_URLS = {
+    "germany": [
+        "https://www.amazon.de/s?i=electronics&rh=n%3A3468301&s=popularity-rank&fs=true&language=en&ref=lp_3468301_sar",
+    ],
+    "italy": [
+        "https://www.amazon.it/s?i=electronics&srs=203868731031&rh=n%3A203868731031&s=popularity-rank&fs=true&language=en&ref=lp_203868731031_sar",
+    ],
+    "sweden": [
+        "https://www.amazon.se/s?i=electronics&rh=n%3A20637719031&s=popularity-rank&fs=true&language=en&ref=lp_20637719031_sar",
+    ],
 }
 
 

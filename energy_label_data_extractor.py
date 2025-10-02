@@ -72,6 +72,7 @@ class EnergyLabelDataExtractor:
         self.processed_asins: Set[str] = set()
         self.brands_found: Dict[str, Set[str]] = {}  # domain -> brands
         self.failed_products: List[dict] = []  # Track failed extractions
+        self.seller_rows: List[dict] = []
 
     async def random_delay(self, min_factor=1.0, max_factor=1.0):
         """Add a random delay to simulate human behavior"""
@@ -330,6 +331,40 @@ class EnergyLabelDataExtractor:
                             self.brands_found[domain].add(product_info.brand)
 
                             logger.info(f"✓ Extracted: {product_info.brand} - {product_info.product_name[:50]}...")
+                            # Accumulate seller row
+                            self.seller_rows.append({
+                                "amazon_host": product_info.amazon_host,
+                                "asin": product_info.asin,
+                                "brand": product_info.brand,
+                                "product_name": product_info.product_name,
+                                "product_url": product_info.product_url,
+                                "seller_name": product_info.seller_name,
+                                "seller_url": product_info.seller_url,
+                                "has_energy_text": product_info.has_energy_text,
+                                "category": product_info.category,
+                            })
+                            # Also capture screenshot where possible
+                            try:
+                                # Try to capture main product block
+                                element = await page.query_selector("div#ppd")
+                                if not element:
+                                    for selector in ("#dp", "#dp-container", "#centerCol"):
+                                        element = await page.query_selector(selector)
+                                        if element:
+                                            break
+                                if element:
+                                    from amazon_utils import sanitize_dirname, extract_asin_from_url
+                                    asin_local = extract_asin_from_url(link_data['url']) or link_data['asin']
+                                    country = f"www.{link_data['domain']}".replace("www.amazon.", "")
+                                    brand_dir = sanitize_dirname(product_info.brand)
+                                    from pathlib import Path
+                                    img_dir = Path("screenshots/brand_products") / country / brand_dir
+                                    img_dir.mkdir(parents=True, exist_ok=True)
+                                    img_path = img_dir / f"product_{asin_local}.png"
+                                    if not img_path.exists():
+                                        await element.screenshot(path=str(img_path))
+                            except Exception as se:
+                                logger.debug(f"Screenshot skipped: {se}")
                         else:
                             logger.warning(f"✗ Failed to extract info for ASIN {asin}")
                             self.failed_products.append(link_data)
@@ -468,6 +503,13 @@ class EnergyLabelDataExtractor:
             brand_summary.to_excel(summary_file, index=False)
             logger.info(f"Saved brand summary to {summary_file}")
 
+            # Save seller rows CSV for this country
+            if self.seller_rows:
+                sellers_df = pd.DataFrame(self.seller_rows)
+                sellers_file = os.path.join(country_dir, f"{country_key}_sellers.csv")
+                sellers_df.to_csv(sellers_file, index=False)
+                logger.info(f"Saved sellers CSV to {sellers_file}")
+
         except ImportError:
             logger.error("pandas not installed, saving as JSON")
             filename = os.path.join(country_dir, f"{country_key}_products_extracted.json")
@@ -504,6 +546,13 @@ class EnergyLabelDataExtractor:
             filename = os.path.join(RESULTS_DIR, "all_products_extracted.xlsx")
             df.to_excel(filename, index=False)
             logger.info(f"Saved {len(data)} total products to {filename}")
+
+            # Save consolidated sellers CSV
+            if self.seller_rows:
+                sellers_df = pd.DataFrame(self.seller_rows)
+                sellers_file = os.path.join(RESULTS_DIR, "all_sellers.csv")
+                sellers_df.to_csv(sellers_file, index=False)
+                logger.info(f"Saved consolidated sellers CSV to {sellers_file}")
 
             # Create overall brand analysis
             brand_analysis = []

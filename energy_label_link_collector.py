@@ -55,7 +55,7 @@ class ProductLink(ProductLink):
 
 
 # Import configurations from the original module
-from amazon_config import COUNTRY_CONFIGS, ENERGY_CATEGORIES, CATEGORY_QUERIES
+from amazon_config import COUNTRY_CONFIGS, ENERGY_CATEGORIES, CATEGORY_QUERIES, CATEGORY_SEED_URLS
 
 
 class EnergyLabelLinkCollector:
@@ -74,6 +74,8 @@ class EnergyLabelLinkCollector:
         self.processed_asins: Set[str] = set()
         self.progress_file = os.path.join(LINKS_DIR, "collection_progress.json")
         self.completed_countries: Set[str] = set()
+        self.current_signature: Optional[str] = None
+        self.completed_by_signature: Dict[str, Set[str]] = {}
 
     def load_progress(self) -> Dict[str, any]:
         """Load collection progress from file"""
@@ -81,8 +83,22 @@ class EnergyLabelLinkCollector:
             try:
                 with open(self.progress_file, 'r', encoding='utf-8') as f:
                     progress = json.load(f)
-                    self.completed_countries = set(progress.get('completed_countries', []))
-                    logger.info(f"Loaded progress: {len(self.completed_countries)} countries completed")
+                    # Load new structure if present
+                    completed_by_signature = progress.get('completed_by_signature', {})
+                    # Normalize to sets
+                    self.completed_by_signature = {sig: set(vals) for sig, vals in completed_by_signature.items()}
+                    # Also keep legacy list for backward compatibility
+                    legacy_completed = set(progress.get('completed_countries', []))
+                    if legacy_completed:
+                        self.completed_by_signature.setdefault('legacy', set()).update(legacy_completed)
+                    # Populate the in-memory completed_countries for the current signature only
+                    if self.current_signature and self.current_signature in self.completed_by_signature:
+                        self.completed_countries = set(self.completed_by_signature[self.current_signature])
+                        logger.info(f"Loaded progress for signature '{self.current_signature}': {len(self.completed_countries)} countries completed")
+                    else:
+                        self.completed_countries = set()
+                        if self.current_signature:
+                            logger.info(f"No saved progress for signature '{self.current_signature}' yet")
                     return progress
             except Exception as e:
                 logger.error(f"Error loading progress: {str(e)}")
@@ -92,9 +108,14 @@ class EnergyLabelLinkCollector:
         """Save collection progress to file"""
         if country_key:
             self.completed_countries.add(country_key)
+            if self.current_signature:
+                self.completed_by_signature.setdefault(self.current_signature, set()).add(country_key)
 
         progress = {
+            # Keep legacy field for backward compatibility (current signature only)
             "completed_countries": list(self.completed_countries),
+            # New structure: map signature -> list of completed countries
+            "completed_by_signature": {sig: sorted(list(vals)) for sig, vals in self.completed_by_signature.items()},
             "last_updated": datetime.now().isoformat(),
             "total_countries": len(COUNTRY_CONFIGS),
             "remaining_countries": [c for c in COUNTRY_CONFIGS.keys() if c not in self.completed_countries]
@@ -123,9 +144,9 @@ class EnergyLabelLinkCollector:
                 return latest_file
         return None
 
-    def is_country_completed(self, country_key: str) -> bool:
+    def is_country_completed(self, country_key: str, missing_mode: str, categories: Optional[List[str]]) -> bool:
         """Check if a country has been completed recently"""
-        # Check progress file
+        # Check progress file for this signature
         if country_key in self.completed_countries:
             return True
 
@@ -135,8 +156,15 @@ class EnergyLabelLinkCollector:
             try:
                 with open(existing_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    if data.get('total_links', 0) > 0:
-                        logger.info(f"Found existing links file for {country_key}: {existing_file}")
+                    # Verify metadata signature matches
+                    file_missing_mode = data.get('missing_mode')
+                    file_categories = data.get('categories')
+                    categories_set = set(categories or [])
+                    file_categories_set = set(file_categories or [])
+                    if data.get('total_links', 0) > 0 and \
+                       file_missing_mode == missing_mode and \
+                       file_categories_set == categories_set:
+                        logger.info(f"Found matching existing links file for {country_key}: {existing_file}")
                         self.completed_countries.add(country_key)
                         return True
             except Exception as e:
@@ -458,7 +486,9 @@ class EnergyLabelLinkCollector:
             return False
 
     async def collect_product_links(self, page: Page, category_key: str, category_name: str,
-                                    country_key: str, domain: str) -> List[ProductLink]:
+                                    country_key: str, domain: str,
+                                    missing_mode: str = "label",
+                                    limit_remaining: Optional[int] = None) -> List[ProductLink]:
         """Collect product links from search results"""
         links = []
         current_page = 1
@@ -489,21 +519,36 @@ class EnergyLabelLinkCollector:
                 # Process each product
                 for product_element in product_elements:
                     try:
+                        # Stop if we've reached the remaining limit
+                        if limit_remaining is not None and len(links) >= limit_remaining:
+                            logger.info("Reached per-country limit while processing this category")
+                            return links
+
                         # Extract ASIN
                         asin = await product_element.get_attribute("data-asin")
                         if not asin or asin in self.processed_asins:
                             continue
 
-                        # Check for energy label
+                        # Check for energy info presence
                         has_formal_label, has_energy_text = await self.check_for_energy_label(product_element)
 
-                        # Skip products with formal energy label
-                        if has_formal_label:
-                            logger.debug(f"Skipping product {asin} - has formal energy label")
+                        # Decide inclusion based on missing mode
+                        include = False
+                        if missing_mode == "label":
+                            include = not has_formal_label
+                        elif missing_mode == "text":
+                            include = not has_energy_text
+                        elif missing_mode == "both":
+                            include = (not has_formal_label and not has_energy_text)
+                        elif missing_mode == "any":
+                            include = (not has_formal_label or not has_energy_text)
+                        else:
+                            include = not has_formal_label
+
+                        if not include:
                             self.processed_asins.add(asin)
                             continue
 
-                        # Collect products WITHOUT formal label
                         products_without_formal_label += 1
 
                         # Find product link
@@ -585,7 +630,9 @@ class EnergyLabelLinkCollector:
         logger.info(f"Collected {len(links)} product links from {current_page} pages")
         return links
 
-    async def collect_country_links(self, country_key: str) -> List[ProductLink]:
+    async def collect_country_links(self, country_key: str, missing_mode: str = "label",
+                                    filtered_categories: Optional[List[str]] = None,
+                                    limit: Optional[int] = None) -> List[ProductLink]:
         """Collect all product links for a specific country"""
         country_config = COUNTRY_CONFIGS[country_key]
         domain = country_config["domain"]
@@ -626,30 +673,61 @@ class EnergyLabelLinkCollector:
                         logger.warning(f"Could not set location for {country_key}")
                     await self.random_delay(1.0, 2.0)
 
-                # Process each category
-                for category_key, category_name in ENERGY_CATEGORIES.items():
+                # First, attempt seed URLs if configured and no category filtering requested
+                if not filtered_categories:
+                    seed_urls = CATEGORY_SEED_URLS.get(country_key, [])
+                    for seed_url in seed_urls:
+                        try:
+                            logger.info(f"Visiting seed URL: {seed_url}")
+                            await navigate_with_handling(page, seed_url, domain, wait_until="domcontentloaded")
+                            # Use a generic category name for seed crawls
+                            seed_category_key = "seed"
+                            seed_category_name = "Seed: Electronics"
+                            seed_links = await self.collect_product_links(
+                                page, seed_category_key, seed_category_name, country_key, domain,
+                                missing_mode=missing_mode,
+                                limit_remaining=(None if limit is None else max(0, limit - len(country_links)))
+                            )
+                            country_links.extend(seed_links)
+                            if limit is not None and len(country_links) >= limit:
+                                logger.info("Reached per-country limit from seeds")
+                                return country_links
+                            # Return to homepage between seeds
+                            homepage_url_with_lang = add_language_param(homepage_url)
+                            await navigate_with_handling(page, homepage_url_with_lang, domain,
+                                                         wait_until="domcontentloaded", post_delay=(2.0, 4.0))
+                        except Exception as e:
+                            logger.error(f"Error processing seed URL: {str(e)}")
+
+                # Then iterate configured energy categories via search
+                categories_iter = ENERGY_CATEGORIES.items()
+                if filtered_categories:
+                    categories_iter = [(k, v) for k, v in ENERGY_CATEGORIES.items() if k in set(filtered_categories)]
+
+                for category_key, category_name in categories_iter:
                     logger.info(f"Processing category: {category_name}")
 
                     try:
-                        # Search for category
                         if await self.search_category(page, category_key, domain):
-                            # Collect links from search results
                             category_links = await self.collect_product_links(
-                                page, category_key, category_name, country_key, domain
+                                page, category_key, category_name, country_key, domain,
+                                missing_mode=missing_mode,
+                                limit_remaining=(None if limit is None else max(0, limit - len(country_links)))
                             )
                             country_links.extend(category_links)
+                            if limit is not None and len(country_links) >= limit:
+                                logger.info("Reached per-country limit from categories")
+                                return country_links
                             logger.info(f"Collected {len(category_links)} links from {category_name}")
                         else:
                             logger.warning(f"Failed to search for {category_name}")
 
-                        # Return to homepage between categories
                         homepage_url_with_lang = add_language_param(homepage_url)
                         await navigate_with_handling(page, homepage_url_with_lang, domain,
                                                      wait_until="domcontentloaded", post_delay=(2.0, 4.0))
 
                     except Exception as e:
                         logger.error(f"Error processing category {category_name}: {str(e)}")
-                        # Try to recover
                         try:
                             await page.goto(self.add_language_param(homepage_url), wait_until="networkidle")
                         except:
@@ -660,7 +738,8 @@ class EnergyLabelLinkCollector:
 
         return country_links
 
-    def save_links(self, country_key: str, links: List[ProductLink]):
+    def save_links(self, country_key: str, links: List[ProductLink], *, missing_mode: str,
+                   categories: Optional[List[str]]):
         """Save collected links to JSON file"""
         if not links:
             logger.warning(f"No links to save for {country_key}")
@@ -679,7 +758,9 @@ class EnergyLabelLinkCollector:
                 "country": country_key,
                 "collection_timestamp": datetime.now().isoformat(),
                 "total_links": len(links_data),
-                "links": links_data
+                "links": links_data,
+                "missing_mode": missing_mode,
+                "categories": sorted(list(categories or [])),
             }, f, indent=2, ensure_ascii=False)
 
         logger.info(f"Saved {len(links)} links to {filename}")
@@ -706,9 +787,15 @@ class EnergyLabelLinkCollector:
         for cat, count in summary["by_category"].items():
             print(f"    - {cat}: {count}")
 
-    async def collect_all_countries(self, countries: Optional[List[str]] = None, resume: bool = True):
+    async def collect_all_countries(self, countries: Optional[List[str]] = None, resume: bool = True,
+                                    missing_mode: str = "label",
+                                    categories: Optional[List[str]] = None,
+                                    limit_per_country: Optional[int] = None):
         """Collect links for all or specified countries with resume capability"""
         # Load existing progress
+        # Compute current run signature
+        cats = sorted(list(categories or []))
+        self.current_signature = f"missing={missing_mode}|cats={'|'.join(cats) if cats else 'ALL'}"
         if resume:
             self.load_progress()
 
@@ -733,14 +820,17 @@ class EnergyLabelLinkCollector:
                 continue
 
             # Skip if already completed (double-check)
-            if resume and self.is_country_completed(country_key):
+            if resume and self.is_country_completed(country_key, missing_mode, categories):
                 logger.info(f"Skipping {country_key} - already completed")
                 continue
 
             logger.info(f"Processing country {i + 1}/{len(target_countries)}: {country_key}")
 
             # Try to collect links with retries
-            success = await self.collect_country_with_retry(country_key, max_retries=2)
+            success = await self.collect_country_with_retry(country_key, max_retries=2,
+                                                           missing_mode=missing_mode,
+                                                           categories=categories,
+                                                           limit=limit_per_country)
 
             if success:
                 # Mark as completed
@@ -761,7 +851,10 @@ class EnergyLabelLinkCollector:
         else:
             logger.info("All countries completed successfully!")
 
-    async def collect_country_with_retry(self, country_key: str, max_retries: int = 2) -> bool:
+    async def collect_country_with_retry(self, country_key: str, max_retries: int = 2,
+                                         missing_mode: str = "label",
+                                         categories: Optional[List[str]] = None,
+                                         limit: Optional[int] = None) -> bool:
         """Collect links for a country with retry logic"""
         for attempt in range(max_retries + 1):
             try:
@@ -770,13 +863,15 @@ class EnergyLabelLinkCollector:
                     await asyncio.sleep(10.0)  # Wait before retry
 
                 # Collect links for this country
-                links = await self.collect_country_links(country_key)
+                links = await self.collect_country_links(country_key, missing_mode=missing_mode,
+                                                         filtered_categories=categories,
+                                                         limit=limit)
 
                 # Store in memory
                 self.collected_links[country_key] = links
 
                 # Save to file
-                self.save_links(country_key, links)
+                self.save_links(country_key, links, missing_mode=missing_mode, categories=categories)
 
                 logger.info(f"Collected {len(links)} links for {country_key}")
                 return True
@@ -844,12 +939,25 @@ async def main():
                         help='Show collection status and exit')
     parser.add_argument('--reset', action='store_true',
                         help='Reset progress and start over')
+    parser.add_argument('--missing-text-only', action='store_true',
+                        help='[Deprecated] Collect only products with neither label nor energy text (maps to --missing-mode both)')
+    parser.add_argument('--missing-mode', type=str, choices=['label', 'text', 'both', 'any'], default='label',
+                        help='Select which missing condition to collect: label, text, both, or any')
+    parser.add_argument('--categories', type=str,
+                        help='Comma-separated category keys to include (e.g., smartphones_tablets)')
+    parser.add_argument('--limit', type=int,
+                        help='Limit number of links to collect per country (test runs)')
     args = parser.parse_args()
 
     # Parse countries
     countries = None
     if args.countries:
         countries = [c.strip().lower() for c in args.countries.split(',')]
+
+    # Parse categories
+    categories = None
+    if args.categories:
+        categories = [c.strip() for c in args.categories.split(',')]
 
     # Set up proxy manager
     proxy_manager = None
@@ -914,7 +1022,15 @@ async def main():
 
     try:
         # Collect links
-        await collector.collect_all_countries(countries, resume=resume_mode)
+        # Backward-compat: map --missing-text-only to missing_mode='both'
+        missing_mode = args.missing_mode
+        if args.missing_text_only:
+            missing_mode = 'both'
+
+        await collector.collect_all_countries(countries, resume=resume_mode,
+                                              missing_mode=missing_mode,
+                                              categories=categories,
+                                              limit_per_country=args.limit)
 
         # Print summary
         collector.print_summary()
