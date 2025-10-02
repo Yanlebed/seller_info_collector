@@ -1,0 +1,15 @@
+Problem we set out to solve
+Identify Amazon listings across EU marketplaces (ES, FR, IT, NL, SE) that should have EPREL energy labels but don’t, so brands can be contacted to fix compliance issues.
+Purpose and goals
+Collect links to candidate products per country/category (Module 1).
+Visit each product and extract details (brand, seller, ASIN, URL, category, energy info status) with robust navigation (cookies, intermediate pages, location settings) and resume capability (Module 2).
+Produce clean, consolidated datasets:
+Per-country product files and brand summaries.
+Global all_products_extracted.xlsx and all_brands_analysis_extracted.xlsx.
+Generate personalized outreach messages per brand, and take a small, representative set of screenshots for brands with many affected products, with resume and proper foldering.
+Key challenges we hit (and fixed)
+Browser setup issues (missing setup_camoufox, dependency installs, geoip extra, viewport arg).
+Flaky navigation due to cookie banners and intermediate pages; added robust handlers and delays.
+Resume requirements after interruptions (e.g., Spain partial run) for both link collection and data extraction.
+Normalizing brand names and detecting product vs. search result pages for screenshots.
+Data consolidation: schema compatibility and avoiding duplicates when appending Spain.

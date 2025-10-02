@@ -41,6 +41,11 @@ from playwright.async_api import Page
 
 from proxy_manager import ProxyManager, ProxyStats
 from captcha_solver import CaptchaSolver
+from amazon_utils import add_language_param, navigate_with_handling
+from amazon_utils import (
+    handle_cookie_banner as util_handle_cookie_banner,
+    handle_intermediate_page as util_handle_intermediate_page,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -64,191 +69,9 @@ COOKIES_DIR = "cookies_energy"
 os.makedirs(COOKIES_DIR, exist_ok=True)
 
 # Data structures for energy label scraping
-@dataclass
-class ProductInfo:
-    """Structure to hold product information"""
-    amazon_host: str
-    brand: str
-    product_name: str
-    product_url: str
-    seller_name: str
-    seller_url: str
-    has_energy_text: bool  # True if has energy text but no formal label, False if no energy info at all
-    category: str
-    asin: str
-    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+from models import ProductInfo
 
-    def to_dict(self) -> dict:
-        return {
-            "amazon_host": self.amazon_host,
-            "brand": self.brand,
-            "product_name": self.product_name,
-            "product_url": self.product_url,
-            "seller_name": self.seller_name,
-            "seller_url": self.seller_url,
-            "has_energy_text": self.has_energy_text,
-            "category": self.category,
-            "asin": self.asin,
-            "timestamp": self.timestamp
-        }
-
-# Country and category configurations with postcodes
-COUNTRY_CONFIGS = {
-    "sweden": {
-        "domain": "amazon.se",
-        "country_code": "SE",
-        "locale": "sv-SE",
-        "use_postcode": True,
-        "postcode": "112 19"
-    },
-    "france": {
-        "domain": "amazon.fr",
-        "country_code": "FR",
-        "locale": "fr-FR",
-        "use_postcode": True,
-        "postcode": "75017",
-        "note": "May show intermediate page with 'Continuer les achats' button"
-    },
-    "italy": {
-        "domain": "amazon.it",
-        "country_code": "IT",
-        "locale": "it-IT",
-        "use_postcode": True,
-        "postcode": "00195",
-        "note": "May show intermediate page with 'Clicca qui per tornare alla home page' link"
-    },
-    "spain": {
-        "domain": "amazon.es",
-        "country_code": "ES",
-        "locale": "es-ES",
-        "use_postcode": True,
-        "postcode": "28055",
-        "note": "May show intermediate page with 'Seguir comprando' button"
-    },
-    "netherlands": {
-        "domain": "amazon.nl",
-        "country_code": "NL",
-        "locale": "nl-NL",
-        "use_postcode": False  # Netherlands handles location automatically
-    }
-}
-
-# Categories with energy labels
-ENERGY_CATEGORIES = {
-    "light_sources": "Light Sources",
-    "domestic_ovens": "Domestic Ovens",
-    "range_hoods": "Range Hoods",
-    "dishwashers": "Household Dishwashers",
-    "washing_machines": "Household Washing Machines",
-    "washing_dryers": "Household Washing Dryers",
-    "tumble_dryers": "Tumble Dryers",
-    "fridges_freezers": "Fridges and Freezers",
-    "commercial_refrigerators": "Commercial Refrigerators",
-    "professional_refrigerated_cabinets": "Professional Refrigerated Storage Cabinets",
-    "air_conditioners": "Air Conditioners and Comfort Fans",
-    "space_heaters": "Local Space Heaters",
-    "ventilation_units": "Ventilation Units",
-    "solid_fuel_boilers": "Solid Fuel Boilers",
-    "water_heaters": "Water Heaters",
-    "electronic_displays": "Electronic Displays",
-    "smartphones_tablets": "Smartphones and Tablets",
-    "tires": "Tires"
-}
-
-# Category search queries for each marketplace
-CATEGORY_QUERIES = {
-    "light_sources": {
-        "amazon.se": "ljuskällor",
-        "amazon.fr": "sources lumineuses",
-        "amazon.it": "sorgenti luminose",
-        "amazon.es": "fuentes de luz",
-        "amazon.nl": "lichtbronnen"
-    },
-    "domestic_ovens": {
-        "amazon.se": "ugnar",
-        "amazon.fr": "fours domestiques",
-        "amazon.it": "forni domestici",
-        "amazon.es": "hornos domésticos",
-        "amazon.nl": "ovens"
-    },
-    "range_hoods": {
-        "amazon.se": "köksfläktar",
-        "amazon.fr": "hottes de cuisine",
-        "amazon.it": "cappe da cucina",
-        "amazon.es": "campanas extractoras",
-        "amazon.nl": "afzuigkappen"
-    },
-    "dishwashers": {
-        "amazon.se": "diskmaskiner",
-        "amazon.fr": "lave-vaisselle",
-        "amazon.it": "lavastoviglie",
-        "amazon.es": "lavavajillas",
-        "amazon.nl": "vaatwassers"
-    },
-    "washing_machines": {
-        "amazon.se": "tvättmaskiner",
-        "amazon.fr": "machines à laver",
-        "amazon.it": "lavatrici",
-        "amazon.es": "lavadoras",
-        "amazon.nl": "wasmachines"
-    },
-    "washing_dryers": {
-        "amazon.se": "torktumlare",
-        "amazon.fr": "sèche-linge",
-        "amazon.it": "asciugatrici",
-        "amazon.es": "secadoras",
-        "amazon.nl": "wasdrogers"
-    },
-    "tumble_dryers": {
-        "amazon.se": "torktumlare",
-        "amazon.fr": "sèche-linge tambour",
-        "amazon.it": "asciugatrici a tamburo",
-        "amazon.es": "secadoras de tambor",
-        "amazon.nl": "trommel drogers"
-    },
-    "fridges_freezers": {
-        "amazon.se": "kylskåp frysar",
-        "amazon.fr": "réfrigérateurs congélateurs",
-        "amazon.it": "frigoriferi congelatori",
-        "amazon.es": "frigoríficos congeladores",
-        "amazon.nl": "koelkasten vriezers"
-    },
-    "air_conditioners": {
-        "amazon.se": "luftkonditionering",
-        "amazon.fr": "climatiseurs",
-        "amazon.it": "condizionatori",
-        "amazon.es": "aires acondicionados",
-        "amazon.nl": "airconditioners"
-    },
-    "water_heaters": {
-        "amazon.se": "varmvattenberedare",
-        "amazon.fr": "chauffe-eau",
-        "amazon.it": "scaldacqua",
-        "amazon.es": "calentadores de agua",
-        "amazon.nl": "boilers"
-    },
-    "electronic_displays": {
-        "amazon.se": "bildskärmar",
-        "amazon.fr": "écrans électroniques",
-        "amazon.it": "display elettronici",
-        "amazon.es": "pantallas electrónicas",
-        "amazon.nl": "elektronische displays"
-    },
-    "smartphones_tablets": {
-        "amazon.se": "smartphones surfplattor",
-        "amazon.fr": "smartphones tablettes",
-        "amazon.it": "smartphone tablet",
-        "amazon.es": "smartphones tablets",
-        "amazon.nl": "smartphones tablets"
-    },
-    "tires": {
-        "amazon.se": "däck",
-        "amazon.fr": "pneus",
-        "amazon.it": "pneumatici",
-        "amazon.es": "neumáticos",
-        "amazon.nl": "banden"
-    }
-}
+from amazon_config import COUNTRY_CONFIGS, ENERGY_CATEGORIES, CATEGORY_QUERIES
 
 class EnergyLabelScraper:
     """
@@ -306,112 +129,12 @@ class EnergyLabelScraper:
         return AsyncCamoufox(**camoufox_config)
 
     async def handle_intermediate_page(self, page: Page, domain: str) -> bool:
-        """
-        Handle intermediate pages that appear on some Amazon domains.
-
-        Amazon.it sometimes shows a page with "Clicca qui per tornare alla home page di Amazon.it"
-        Amazon.es sometimes shows a page with "Seguir comprando" button
-        Amazon.fr sometimes shows a page with "Continuer les achats" button
-
-        These pages appear randomly and need to be clicked through to reach the actual site.
-        """
-        try:
-            # Amazon.it intermediate page
-            if domain == "amazon.it":
-                # Check for the "Click here to return to Amazon.it homepage" link
-                it_button = await page.query_selector(
-                    'xpath=//a[contains(text(), "Clicca qui per tornare alla home page di Amazon.it")]'
-                )
-                alternative_it_button = await page.query_selector(
-                    'xpath=//button[@alt="Continua con gli acquisti"]'
-                )
-                final_it_button = it_button or alternative_it_button
-                if final_it_button:
-                    logger.info("Found Amazon.it intermediate page, clicking to go to homepage")
-                    await final_it_button.click()
-                    await page.wait_for_load_state("networkidle")
-                    await self.random_delay(1.0, 2.0)
-                    return True
-
-            # Amazon.es intermediate page
-            elif domain == "amazon.es":
-                # Check for the "Continue shopping" button
-                es_button = await page.query_selector('xpath=//button[@alt="Seguir comprando"]')
-                if es_button:
-                    logger.info("Found Amazon.es intermediate page, clicking to continue")
-                    await es_button.click()
-                    await page.wait_for_load_state("networkidle")
-                    await self.random_delay(1.0, 2.0)
-                    return True
-
-            # Amazon.fr intermediate page
-            elif domain == "amazon.fr":
-                # Check for the "Continue shopping" button in French
-                fr_button = await page.query_selector('xpath=//button[@alt="Continuer les achats"]')
-                if fr_button:
-                    logger.info("Found Amazon.fr intermediate page, clicking to continue")
-                    await fr_button.click()
-                    await page.wait_for_load_state("networkidle")
-                    await self.random_delay(1.0, 2.0)
-                    return True
-
-            return False
-
-        except Exception as e:
-            logger.error(f"Error handling intermediate page: {str(e)}")
-            return False
+        """Delegate to shared intermediate-page handler."""
+        return await util_handle_intermediate_page(page, domain)
 
     async def handle_cookie_banner(self, page: Page) -> bool:
-        """
-        Handle cookie consent banner
-
-        Cookie decline buttons by country:
-        - Italy: button[@aria-label="Rifiuta"]
-        - Spain, Netherlands, France: button[@id="sp-cc-rejectall-link"]
-        - Others: Various fallback selectors
-        """
-        try:
-            decline_selectors = [
-                # Italy specific - Primary selector
-                "xpath=//button[@aria-label='Rifiuta']",  # Italian "Reject" button
-
-                # Spain, Netherlands, France specific - Primary selector
-                "xpath=//button[@id='sp-cc-rejectall-link']",  # Common for ES, NL, FR
-
-                # Generic and fallback selectors
-                "xpath=//button[@aria-label='Decline']",
-                "xpath=//input[@id='sp-cc-rejectall-link']",
-                "xpath=//a[@id='sp-cc-rejectall-link']",
-                "xpath=//span[@id='sp-cc-rejectall-link']",
-                "xpath=//button[@data-action='sp-cc-reject-all']",
-                "xpath=//button[contains(text(), 'Reject all')]",
-                "xpath=//button[contains(text(), 'Decline')]",
-                "xpath=//button[contains(text(), 'Reject All')]",
-                "xpath=//button[contains(text(), 'Decline All')]",
-
-                # Additional language-specific text selectors as fallback
-                "xpath=//button[contains(text(), 'Rifiuta tutto')]",  # Italian
-                "xpath=//button[contains(text(), 'Tout refuser')]",  # French
-                "xpath=//button[contains(text(), 'Rechazar todo')]",  # Spanish
-                "xpath=//button[contains(text(), 'Alles afwijzen')]",  # Dutch
-                "xpath=//button[contains(text(), 'Avvisa alla')]"  # Swedish
-            ]
-
-            for selector in decline_selectors:
-                decline_button = await page.query_selector(selector)
-                if decline_button:
-                    is_visible = await decline_button.is_visible()
-                    if is_visible:
-                        logger.info(f"Found cookie decline button with selector: {selector}")
-                        await decline_button.click()
-                        await self.random_delay(0.5, 1.0)
-                        return True
-
-            logger.info("No cookie banner found or already handled")
-            return True
-        except Exception as e:
-            logger.error(f"Error handling cookie banner: {str(e)}")
-            return False
+        """Delegate to shared cookie banner handler."""
+        return await util_handle_cookie_banner(page)
 
     async def set_location_by_postcode(self, page: Page, postcode: str, category_url: Optional[str] = None) -> bool:
         """
@@ -807,10 +530,25 @@ class EnergyLabelScraper:
                 logger.warning(f"No search query found for {category_key} on {domain}")
                 return False
 
-            # Find search box
-            search_box = await page.query_selector("xpath=//input[@id='twotabsearchtextbox']")
+            # Find search box - try multiple selectors
+            search_box_selectors = [
+                "xpath=//input[@id='twotabsearchtextbox']",
+                "xpath=//input[@id='nav-bb-search']",
+                "xpath=//input[@name='field-keywords']",
+                "xpath=//input[@placeholder='Search Amazon']",
+                "xpath=//input[contains(@class, 'nav-input')]",
+                "xpath=//input[contains(@aria-label, 'Search')]"
+            ]
+            
+            search_box = None
+            for selector in search_box_selectors:
+                search_box = await page.query_selector(selector)
+                if search_box:
+                    logger.debug(f"Found search box with selector: {selector}")
+                    break
+            
             if not search_box:
-                logger.error("Could not find search box")
+                logger.error("Could not find search box with any selector")
                 return False
 
             # Click and clear search box
@@ -1077,17 +815,9 @@ class EnergyLabelScraper:
                 page = await browser.new_page()
 
                 # Navigate to homepage with English language
-                homepage_url = f"https://www.{domain}"
-                homepage_url = self.add_language_param(homepage_url)
+                homepage_url = add_language_param(f"https://www.{domain}")
                 logger.info(f"Navigating to {homepage_url} (with English language)")
-                await page.goto(homepage_url, wait_until="networkidle")
-
-                # Handle intermediate page if present
-                await self.handle_intermediate_page(page, domain)
-
-                # Handle cookie banner
-                await self.handle_cookie_banner(page)
-                await self.random_delay()
+                await navigate_with_handling(page, homepage_url, domain, wait_until="networkidle")
 
                 # Set location if postcode is configured
                 if use_postcode and postcode:
@@ -1114,20 +844,15 @@ class EnergyLabelScraper:
                             logger.warning(f"Failed to search for {category_name}")
 
                         # Return to homepage between categories
-                        homepage_url_with_lang = self.add_language_param(homepage_url)
-                        await page.goto(homepage_url_with_lang, wait_until="networkidle")
-
-                        # Handle intermediate page again if it appears
-                        await self.handle_intermediate_page(page, domain)
-
-                        await self.random_delay(2.0, 4.0)
+                        homepage_url_with_lang = add_language_param(homepage_url)
+                        await navigate_with_handling(page, homepage_url_with_lang, domain, wait_until="networkidle", post_delay=(2.0, 4.0))
 
                     except Exception as e:
                         logger.error(f"Error processing category {category_name}: {str(e)}")
                         # Try to recover by going back to homepage
                         try:
-                            homepage_url_with_lang = self.add_language_param(homepage_url)
-                            await page.goto(homepage_url_with_lang, wait_until="networkidle")
+                            homepage_url_with_lang = add_language_param(homepage_url)
+                            await navigate_with_handling(page, homepage_url_with_lang, domain, wait_until="networkidle")
                         except:
                             pass
 
